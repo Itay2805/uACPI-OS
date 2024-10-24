@@ -119,18 +119,60 @@ uacpi_status uacpi_kernel_io_write(uacpi_handle handle, uacpi_size offset, uacpi
     return uacpi_kernel_raw_io_write((uintptr_t)handle + offset, byte_width, value);
 }
 
+typedef struct pci_segment {
+    uint8_t first_bus;
+    uint8_t last_bus;
+    uintptr_t base_address;
+} pci_segment_t;
+
 uacpi_status uacpi_kernel_pci_read(
     uacpi_pci_address *address, uacpi_size offset,
     uacpi_u8 byte_width, uacpi_u64 *value
 ) {
-    return UACPI_STATUS_UNIMPLEMENTED;
+    if (address->segment != 0 || offset > 0xFF) {
+        *value = UINT64_MAX;
+        return UACPI_STATUS_OK;
+    }
+
+    // set the address
+    uint32_t pci_address = (uint32_t)((address->bus << 16) | (address->device << 11) | (address->function << 8) | (offset & 0xFC) | ((uint32_t)0x80000000));
+    outl(0xCF8, pci_address);
+
+    // read it
+    uint32_t reg = inl(0xCFC);
+    switch (byte_width) {
+        case 1: *value = reg >> ((offset & 0b11) * 8) & 0xff; break;
+        case 2: *value = reg >> ((offset & 0b11) * 8) & 0xffff; break;
+        case 4: *value = reg; break;
+        default: return UACPI_STATUS_INVALID_ARGUMENT;
+    }
+
+    return UACPI_STATUS_OK;
 }
 
 uacpi_status uacpi_kernel_pci_write(
     uacpi_pci_address *address, uacpi_size offset,
     uacpi_u8 byte_width, uacpi_u64 value
 ) {
-    return UACPI_STATUS_UNIMPLEMENTED;
+    if (address->segment != 0 || offset > 0xFF) {
+        return UACPI_STATUS_OK;
+    }
+
+    // set the address
+    uint32_t pci_address = (uint32_t)((address->bus << 16) | (address->device << 11) | (address->function << 8) | (offset & 0xFC) | ((uint32_t)0x80000000));
+    outl(0xCF8, pci_address);
+
+    // read it
+    uint32_t reg = inl(0xCFC);
+    switch (byte_width) {
+        case 1: return UACPI_STATUS_UNIMPLEMENTED;
+        case 2: return UACPI_STATUS_UNIMPLEMENTED;
+        case 4: reg = value; break;
+        default: return UACPI_STATUS_INVALID_ARGUMENT;
+    }
+    outl(0xCFC, reg);
+
+    return UACPI_STATUS_OK;
 }
 
 void* uacpi_kernel_map(uacpi_phys_addr addr, uacpi_size len) {
@@ -199,7 +241,6 @@ uacpi_status uacpi_kernel_initialize(uacpi_init_level current_init_lvl) {
         } break;
 
         case UACPI_INIT_LEVEL_NAMESPACE_LOADED: {
-
         } break;
 
         case UACPI_INIT_LEVEL_NAMESPACE_INITIALIZED: {
@@ -269,7 +310,15 @@ void _start() {
         goto error;
     }
 
-    uacpi_info("Initialized!");
+    uacpi_info("Initialized!\n");
+
+    uacpi_args args = { .count = 0, };
+    uacpi_object* ret;
+    status = uacpi_eval(uacpi_namespace_root(), "\\KENT", &args, &ret);
+    if (uacpi_unlikely_error(status)) {
+        uacpi_error("failed to initialize kernel: %s\n", uacpi_status_to_string(status));
+        goto error;
+    }
 
 error:
     asm("cli; hlt");
