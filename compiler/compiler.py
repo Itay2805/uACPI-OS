@@ -1,397 +1,178 @@
+import argparse
 import ast
+import enum
+import inspect
 import os
 import struct
-import textwrap
-import types
-import inspect
-import dis
-from pprint import pprint
+import tempfile
+from dataclasses import dataclass
 
-from setuptools.command.alias import alias
-from sympy.codegen.cnodes import static
+from sympy import false
+from sympy.physics.units import current
 
 ACPI_TABLE_HEADER = struct.Struct('<4sIBB6s8sI4sI')
 
 
-_OPCODE_CAN_STORE = {
-    0x72
-}
+class Compiler:
 
+    def __init__(self, mod_name = 'DMOD'):
+        self._namespace = {}
+        self.current_node = self._namespace
+        self._node_stack = []
 
-class Table:
+        self.buffer = bytearray()
 
-    def __init__(self):
-        self._buffer = bytearray()
-        self._id_gen = 0
-        self._name_lookup = {}
-        self._current_namespace = self._name_lookup
-        self._namespace_stack = []
+        self._name_idx = 0
 
-        self._args = None
-        self._locals = None
+        self._module_pkg_length = None
+        self._init_module(mod_name)
 
-        self._for_loop_next = []
+    def _gen_name(self, name, typ):
+        if name == 'main':
+            acpi_name = 'MAIN'
+        else:
+            acpi_name = f'U{self._name_idx:03x}'
+            self._name_idx += 1
+        self.current_node[name] = (acpi_name, typ)
 
+    def _init_module(self, mod_name):
+        if mod_name is None:
+            return
 
+        # emit a device to enclose the entire program
+        self.emit_byte(0x5B)
+        self.emit_byte(0x82)
+        self._module_pkg_length = self.start_pkg_length()
+        self.emit_name(mod_name)
 
-    def _push_namespace(self, name):
-        n = {}
-        self._namespace_stack.append(self._current_namespace)
-        self._current_namespace[name] = n
-        self._current_namespace = n
-        return n
+    def resolve_path(self, longname):
+        return self.current_node[longname]
 
-    def _pop_namespace(self):
-        self._current_namespace = self._namespace_stack.pop()
+    def resolve_type_annotation(self, ann):
+        assert ann is not None, "Missing type annotation"
+        if isinstance(ann, ast.Name):
+            if ann.id == 'int':
+                return int
+            elif ann.id == 'bytes':
+                return bytes
+            elif ann.id == 'str':
+                return str
+            else:
+                assert False, ann.id
+        else:
+            assert False, ast.dump(ann)
 
-    def _gen_name(self, longname):
-        name = f'U{self._id_gen:03x}'
-        self._id_gen += 1
-        assert name not in self._current_namespace
-        self._current_namespace[longname] = name
-        print(longname, name)
-        return name
-
-    def _lookup_name(self, longname):
-        return self._name_lookup[longname]
-
-    def _emit_name_string(self, s: str):
-        for c in s.encode('utf-8'):
-            assert c in b'0123456789\\^_ABCDEFGHIKLMNOPQRSTUVWXYZ', c
-            self._buffer.append(c)
-
-    def _emit_pkg_length(self, length: int, idx=None):
+    def emit_byte(self, value, idx=None):
+        value &= 0xFF
         if idx is None:
-            idx = len(self._buffer)
-
-        if (length + 1) <= 63:
-            length += 1
-            self._buffer.insert(idx, length)
-        elif (length + 2) <= 0xFF + 16:
-            length += 2
-            self._buffer.insert(idx, 1 << 6 | (length & 0xF))
-            self._buffer.insert(idx + 1, (length >> 4) & 0xFF)
-        elif (length + 3) <= 0xFFFF + 16:
-            length += 3
-            self._buffer.insert(idx, 2 << 6 | (length & 0xF))
-            self._buffer.insert(idx + 1, (length >> 4) & 0xFF)
-            self._buffer.insert(idx + 2, (length >> 12) & 0xFF)
-        elif (length + 4) <= 0xFFFFFF + 16:
-            length += 4
-            self._buffer.insert(idx, 3 << 6 | (length & 0xF))
-            self._buffer.insert(idx + 1, (length >> 4) & 0xFF)
-            self._buffer.insert(idx + 2, (length >> 12) & 0xFF)
-            self._buffer.insert(idx + 3, (length >> 20) & 0xFF)
+            self.buffer.append(value)
         else:
-            assert False, length
+            self.buffer.insert(idx, value)
 
-    def _resolve_method(self, func):
-        if isinstance(func, ast.Attribute):
-            m = self._resolve_method(func.value)
-            return m[func.attr]
-
-        elif isinstance(func, ast.Name):
-            return self._lookup_name(func.id)
-
-        else:
-            assert False, ast.dump(func, indent=4)
-
-    def _emit_expression(self, node):
-        if isinstance(node, ast.Compare):
-            assert len(node.ops) == 1
-            assert len(node.comparators) == 1
-
-            op = {
-                ast.And: (0x90,),
-                ast.Or: (0x91,),
-                ast.NotEq: (0x92, 0x93),
-                ast.LtE: (0x92, 0x94),
-                ast.GtE: (0x92, 0x95),
-                ast.Eq: (0x93,),
-                ast.Gt: (0x94,),
-                ast.Lt: (0x95,),
-            }[type(node.ops[0])]
-            for o in op:
-                self._buffer.append(o)
-
-            self._emit_expression(node.left)
-            self._emit_expression(node.comparators[0])
-
-        elif isinstance(node, ast.BinOp):
-            self._emit_expression(node.op)
-            self._emit_expression(node.left)
-            self._emit_expression(node.right)
-            self._buffer.append(0)
-
-        elif isinstance(node, ast.UnaryOp):
-            self._emit_expression(node.op)
-            self._emit_expression(node.operand)
-
-        elif isinstance(node, ast.Add):
-            self._buffer.append(0x72)
-        elif isinstance(node, ast.Sub):
-            self._buffer.append(0x74)
-        elif isinstance(node, ast.Mult):
-            self._buffer.append(0x77)
-        elif isinstance(node, ast.FloorDiv) or isinstance(node, ast.Div): # TODO: is this what I want?
-            self._buffer.append(0x78)
-        elif isinstance(node, ast.Mod):
-            self._buffer.append(0x85)
-        elif isinstance(node, ast.BitAnd):
-            self._buffer.append(0x7B)
-        elif isinstance(node, ast.BitOr):
-            self._buffer.append(0x7D)
-        elif isinstance(node, ast.BitXor):
-            self._buffer.append(0x7F)
-        elif isinstance(node, ast.Not):
-            self._buffer.append(0x92)
-
-        elif isinstance(node, ast.Name):
-            if node.id in self._args:
-                self._buffer.append(0x68 + self._args[node.id])
+    def start_pkg_length(self):
+        start = len(self.buffer)
+        def close_pkg_length():
+            end = len(self.buffer)
+            l = end - start
+            if l + 1 <= 63:
+                l += 1
+                self.buffer.insert(start, l)
+            elif l + 2 <= 0xFF + 16:
+                l += 2
+                self.buffer.insert(start, 1 << 6 | (l & 0xF))
+                self.buffer.insert(start + 1, (l >> 4) & 0xFF)
+            elif l + 3 <= 0xFFFF + 16:
+                l += 3
+                self.buffer.insert(start, 2 << 6 | (l & 0xF))
+                self.buffer.insert(start + 1, (l >> 4) & 0xFF)
+                self.buffer.insert(start + 2, (l >> 12) & 0xFF)
+            elif l + 4 <= 0xFFFFFF + 16:
+                l += 4
+                self.buffer.insert(start, 3 << 6 | (l & 0xF))
+                self.buffer.insert(start + 1, (l >> 4) & 0xFF)
+                self.buffer.insert(start + 2, (l >> 12) & 0xFF)
+                self.buffer.insert(start + 3, (l >> 20) & 0xFF)
             else:
-                # add the local if not found yet
-                if node.id not in self._locals:
-                    assert len(self._locals) < 8
-                    self._locals[node.id] = len(self._locals)
+                assert False
+            pass
+        return close_pkg_length
 
-                self._buffer.append(0x60 + self._locals[node.id])
+    def emit_name(self, s):
+        for i in s:
+            assert i in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_^\\', s
+            self.emit_byte(ord(i))
 
-        elif isinstance(node, ast.Call):
-            # TODO: support dynamic dispatch
-            name = self._resolve_method(node.func)
-            self._emit_name_string(name)
-            for arg in node.args:
-                self._emit_expression(arg)
-
-        elif isinstance(node, ast.Constant):
-            val = node.value & 0xFFFFFFFFFFFFFFFF
-            if val == 0:
-                self._buffer.append(0x00)
-            elif val == 1:
-                self._buffer.append(0x01)
-            elif val == 0xFFFFFFFFFFFFFFFF:
-                self._buffer.append(0xFF)
-            elif val <= 0xFF:
-                self._buffer.append(0xA)
-                self._buffer.append((val >> 0) & 0xFF)
-            elif val <= 0xFFFF:
-                self._buffer.append(0x0B)
-                self._buffer.append((val >> 0) & 0xFF)
-                self._buffer.append((val >> 8) & 0xFF)
-            elif val <= 0xFFFFFFFF:
-                self._buffer.append(0x0C)
-                self._buffer.append((val >> 0) & 0xFF)
-                self._buffer.append((val >> 8) & 0xFF)
-                self._buffer.append((val >> 16) & 0xFF)
-                self._buffer.append((val >> 24) & 0xFF)
-            else:
-                self._buffer.append(0x0D)
-                self._buffer.append((val >> 0) & 0xFF)
-                self._buffer.append((val >> 8) & 0xFF)
-                self._buffer.append((val >> 16) & 0xFF)
-                self._buffer.append((val >> 24) & 0xFF)
-                self._buffer.append((val >> 32) & 0xFF)
-                self._buffer.append((val >> 40) & 0xFF)
-                self._buffer.append((val >> 48) & 0xFF)
-                self._buffer.append((val >> 52) & 0xFF)
-
+    def emit_const(self, val):
+        val &= 0xFFFFFFFFFFFFFFFF
+        if val == 0:
+            self.emit_byte(0)
+        elif val == 1:
+            self.emit_byte(1)
+        elif val == 0xFFFFFFFFFFFFFFFF:
+            self.emit_byte(0xFF)
+        elif val <= 0xFF:
+            self.emit_byte(0x0A)
+            self.emit_byte((val >> 0) & 0xFF)
+        elif val <= 0xFFFF:
+            self.emit_byte(0x0B)
+            self.emit_byte((val >> 0) & 0xFF)
+            self.emit_byte((val >> 8) & 0xFF)
+        elif val <= 0xFFFFFFFF:
+            self.emit_byte(0x0C)
+            self.emit_byte((val >> 0) & 0xFF)
+            self.emit_byte((val >> 8) & 0xFF)
+            self.emit_byte((val >> 16) & 0xFF)
+            self.emit_byte((val >> 24) & 0xFF)
         else:
-            assert False, ast.dump(node, indent=4)
+            self.emit_byte(0x0E)
+            self.emit_byte((val >> 0) & 0xFF)
+            self.emit_byte((val >> 8) & 0xFF)
+            self.emit_byte((val >> 16) & 0xFF)
+            self.emit_byte((val >> 24) & 0xFF)
+            self.emit_byte((val >> 32) & 0xFF)
+            self.emit_byte((val >> 40) & 0xFF)
+            self.emit_byte((val >> 48) & 0xFF)
+            self.emit_byte((val >> 56) & 0xFF)
 
-    def _emit_statement(self, node):
-        if isinstance(node, ast.If):
-            self._buffer.append(0xA0)
-            idx = len(self._buffer)
+    def _push_node(self, name):
+        new_node = self.current_node.setdefault(name, {})
+        self._node_stack.append(self.current_node)
+        self.current_node = new_node
 
-            # emit the test expression
-            self._emit_expression(node.test)
+    def _pop_node(self, name):
+        self.current_node = self._node_stack.pop()
 
-            # emit the body
-            for stmt in node.body:
-                self._emit_statement(stmt)
+    def add_module(self, source, filename='<unknown>'):
+        module = ast.parse(source, filename)
 
-            self._emit_pkg_length(len(self._buffer) - idx, idx)
-
-            # if we have nodes at the else then emit the else node
-            if len(node.orelse) > 0:
-                self._buffer.append(0xA1)
-
-                else_idx = len(self._buffer)
-
-                for stmt in node.orelse:
-                    self._emit_statement(stmt)
-
-                self._emit_pkg_length(len(self._buffer) - else_idx, else_idx)
-
-        elif isinstance(node, ast.While):
-            self._buffer.append(0xA2)
-            idx = len(self._buffer)
-
-            assert len(node.orelse) == 0
-
-            self._emit_expression(node.test)
-            for stmt in node.body:
-                self._emit_statement(stmt)
-
-            self._emit_pkg_length(len(self._buffer) - idx, idx)
-
-        elif isinstance(node, ast.For):
-            if isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range':
-                # initialize the index variable
-                if len(node.iter.args) == 1:
-                    # starts from zero
-                    self._emit_statement(ast.Assign([node.target], ast.Constant(0)))
-
-                    # check its smaller than the requested value
-                    # TODO: check if has side-effects (like function call) and if so store it aside
-                    #       since that is not how the python for loop behaves in that case
-                    predicate = ast.Compare(node.target, [ast.Lt()], [node.iter.args[0]])
-
-                    # increments by one
-                    self._for_loop_next.append(ast.AugAssign(node.target, ast.Add(), ast.Constant(1)))
-
+        # first build the namespace we would need
+        for node in module.body:
+            if isinstance(node, ast.FunctionDef):
+                if node.returns is not None:
+                    typ = self.resolve_type_annotation(node.returns)
                 else:
-                    # starts from the first arg
-                    assert len(node.iter.args) <= 3
-
-                    # start from the first variable
-                    self._emit_statement(ast.Assign([node.target], node.iter.args[0]))
-
-                    # check its smaller than the requested value
-                    # TODO: check if has side-effects (like function call) and if so store it aside
-                    #       since that is not how the python for loop behaves in that case
-                    predicate = ast.Compare(node.target, [ast.Lt()], [node.iter.args[1]])
-
-                    # set the step, 1 by default
-                    if len(node.iter.args) == 3:
-                        self._for_loop_next.append(ast.AugAssign(node.target, ast.Add(), node.iter.args[2]))
-                    else:
-                        self._for_loop_next.append(ast.AugAssign(node.target, ast.Add(), ast.Constant(1)))
-
-                # emit the while opcode
-                self._buffer.append(0xA2)
-                idx = len(self._buffer)
-
-                # emit the predicate
-                self._emit_expression(predicate)
-
-                # emit the body
-                stmt = None
-                for stmt in node.body:
-                    self._emit_statement(stmt)
-
-                # check if the last one is something that won't go to the next
-                need_next = True
-                if isinstance(stmt, ast.Break) or isinstance(stmt, ast.Continue) or isinstance(stmt, ast.Return):
-                    need_next = False
-
-                # emit the next
-                if need_next:
-                    self._emit_statement(self._for_loop_next[-1])
-
-                self._emit_pkg_length(len(self._buffer) - idx, idx)
-
+                    typ = None
+                self._gen_name(node.name, typ)
             else:
                 assert False, ast.dump(node, indent=4)
 
-        elif isinstance(node, ast.Return):
-            self._buffer.append(0xA4)
-            self._emit_expression(node.value)
-
-        elif isinstance(node, ast.Assign):
-            if isinstance(node.value, ast.BinOp):
-                # we can optimize by emitting the bin-op and
-                # then storing it in the result
-                self._emit_expression(node.value)
-                self._buffer.pop()
-            else:
-                # emit a store and then the normal operations
-                self._buffer.append(0x70)
-                self._emit_expression(node.value)
-
-            assert len(node.targets) == 1
-            self._emit_expression(node.targets[0])
-
-        elif isinstance(node, ast.AugAssign):
-            self._emit_expression(node.op)
-            self._emit_expression(node.target)
-            self._emit_expression(node.value)
-            self._emit_expression(node.target)
-
-        elif isinstance(node, ast.Continue):
-            # the next before the continue
-            if len(self._for_loop_next):
-                self._emit_statement(self._for_loop_next[-1])
-
-            self._buffer.append(0x9F)
-
-        elif isinstance(node, ast.Break):
-            self._buffer.append(0xA5)
-
-        else:
-            assert False, ast.dump(node, indent=4)
-
-    def _emit_method(self, node: ast.FunctionDef):
-        print(ast.dump(node, indent=4))
-
-        acpi_name = self._current_namespace[node.name]
-
-        assert len(node.args.posonlyargs) == 0
-        assert len(node.args.kwonlyargs) == 0
-        assert len(node.args.kw_defaults) == 0
-        assert len(node.args.defaults) == 0
-        assert len(node.args.args) <= 7
-        method_flags = len(node.args.args)
-
-        self._args = {}
-        for arg in node.args.args:
-            self._args[arg.arg] = len(self._args)
-
-        self._locals = {}
-
-        # emit the header
-        self._buffer.append(0x14)
-        idx = len(self._buffer)
-        self._emit_name_string(acpi_name)
-        self._buffer.append(method_flags)
-
-        # and now emit everything
-        for stmt in node.body:
-            self._emit_statement(stmt)
-
-        # fixup the pkg length
-        self._emit_pkg_length(len(self._buffer) - idx, idx)
-
-        self._locals = None
-        self._args = None
-
-    def add(self, content):
-        code = ast.parse(inspect.getsource(content))
-        code = code.body
-        assert len(code) == 1
-        code = code[0]
-        assert isinstance(code, ast.ClassDef)
-
-        # start by creating all of the names
-        self._push_namespace(code.name)
-        for node in code.body:
+        # now we can go over and generate all the methods
+        for node in module.body:
             if isinstance(node, ast.FunctionDef):
-                self._gen_name(node.name)
+                c = MethodCompiler(self, node)
+                c.compile()
             else:
                 assert False, ast.dump(node, indent=4)
-
-        for node in code.body:
-            if isinstance(node, ast.FunctionDef):
-                self._emit_method(node)
-
-        self._pop_namespace()
 
     def pack(self):
-        # TODO: checksum
-        return ACPI_TABLE_HEADER.pack(
+        # close the module package
+        if self._module_pkg_length is not None:
+            self._module_pkg_length()
+
+        # now emit the table header
+        table = ACPI_TABLE_HEADER.pack(
             b'SSDT',
-            ACPI_TABLE_HEADER.size + len(self._buffer),
+            ACPI_TABLE_HEADER.size + len(self.buffer),
             2,
             0,
             b'uACPI ',
@@ -399,31 +180,392 @@ class Table:
             1,
             b'UOSC',
             0
-        ) + self._buffer
+        ) + self.buffer
+
+        # TODO: calculate the checksum
+
+        return table
 
 
-class Kernel:
+class MethodCompiler:
+    def __init__(self, compiler: Compiler, func: ast.FunctionDef):
+        self._compiler = compiler
+        self._func = func
 
-    @staticmethod
-    def thing(x):
-        a = 1
-        for i in range(x):
-            a *= i
-        return a
+        self._args = {}
+        self._locals = {}
 
-    @staticmethod
-    def thing2(s, e, step):
-        a = 1
-        for i in range(s, e, step):
-            a *= i
-        return a
+    def _resolve_type_annotation(self, ann):
+        return self._compiler.resolve_type_annotation(ann)
+
+    def _get_idx(self):
+        return len(self._compiler.buffer)
+
+    def _lookup_name(self, name):
+        return self._compiler.current_node[name][0]
+
+    def _emit_byte(self, val, idx=None):
+        self._compiler.emit_byte(val, idx)
+
+    def _start_pkg_length(self):
+        return self._compiler.start_pkg_length()
+
+    def _emit_name(self, name):
+        self._compiler.emit_name(name)
+
+    def _emit_const(self, val):
+        self._compiler.emit_const(val)
+
+    def _emit_expression(self, expr):
+        if isinstance(expr, ast.Compare):
+            assert len(expr.ops) == len(expr.comparators)
+            assert len(expr.comparators) == 1
+
+            # emit the correct opcode
+            if isinstance(expr.ops[0], ast.And):
+                self._emit_byte(0x90)
+            elif isinstance(expr.ops[0], ast.Or):
+                self._emit_byte(0x91)
+            elif isinstance(expr.ops[0], ast.NotEq):
+                self._emit_byte(0x92)
+                self._emit_byte(0x93)
+            elif isinstance(expr.ops[0], ast.LtE):
+                self._emit_byte(0x92)
+                self._emit_byte(0x94)
+            elif isinstance(expr.ops[0], ast.GtE):
+                self._emit_byte(0x92)
+                self._emit_byte(0x95)
+            elif isinstance(expr.ops[0], ast.Eq):
+                self._emit_byte(0x93)
+            elif isinstance(expr.ops[0], ast.Gt):
+                self._emit_byte(0x94)
+            elif isinstance(expr.ops[0], ast.Lt):
+                self._emit_byte(0x95)
+            else:
+                assert False, expr.ops[0]
+
+            # emit the full expression
+            self._emit_expression(expr.left)
+            self._emit_expression(expr.comparators[0])
+
+            return int
+
+        elif isinstance(expr, ast.Name):
+            if expr.id in self._args:
+                idx, typ = self._args[expr.id]
+                self._emit_byte(0x68 + idx)
+                return typ
+
+            elif expr.id in self._locals:
+                idx, typ = self._locals[expr.id]
+                self._emit_byte(0x60 + idx)
+                return typ
+
+            else:
+                assert False, ast.dump(expr)
+
+        elif isinstance(expr, ast.Constant):
+            if isinstance(expr.value, int):
+                self._emit_const(expr.value)
+                return int
+            elif isinstance(expr.value, str):
+                self._emit_byte(0x0D)
+                for i in expr.value.encode('utf-8'):
+                    self._emit_byte(i)
+                self._emit_byte(0)
+                return str
+
+            else:
+                assert False, ast.dump(expr)
+
+
+        elif isinstance(expr, ast.Call):
+            assert isinstance(expr.func, ast.Name)
+            ret_typ = None
+
+            if expr.func.id == 'print':
+                if len(expr.args) == 1:
+                    idx = self._get_idx()
+                    typ = self._emit_expression(expr.args[0])
+
+                    if typ == int:
+                        # use ToDecimalString and its target to store
+                        self._emit_byte(0x97, idx)
+                    else:
+                        # use a normal store
+                        self._emit_byte(0x70)
+
+                    # add the debug object
+                    self._emit_byte(0x5B)
+                    self._emit_byte(0x31)
+
+                else:
+                    # add spaces, attempt to merge with existing strings
+                    # when possible
+                    args = [expr.args[0]]
+                    for arg in expr.args[1:]:
+                        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                            args.append(ast.Constant(' ' + arg.value))
+                        elif isinstance(args[-1], ast.Constant) and isinstance(args[-1].value, str):
+                            args[-1] = ast.Constant(args[-1].value + ' ')
+                            args.append(arg)
+                        else:
+                            args.append(ast.Constant(' '))
+                            args.append(arg)
+
+                    for i, arg in enumerate(args):
+                        # emit the concat if not the final one
+                        if i + 1 < len(args):
+                            self._emit_byte(0x73)
+
+                        # emit the argument
+                        idx = self._get_idx()
+                        typ = self._emit_expression(arg)
+                        if typ == int:
+                            self._emit_byte(0x97, idx)
+                            self._emit_byte(0)
+
+                    # all the targets except for the very last one
+                    # need to be nulled
+                    for _ in range(len(args) - 2):
+                        self._emit_byte(0)
+
+                    # and the last target can be Debug
+                    self._emit_byte(0x5B)
+                    self._emit_byte(0x31)
+
+            else:
+                acpi_name, ret_typ = self._compiler.resolve_path(expr.func.id)
+                self._emit_name(acpi_name)
+
+                for arg in expr.args:
+                    typ = self._emit_expression(arg)
+                    # TODO: type check
+
+            return ret_typ
+
+        elif isinstance(expr, ast.BinOp):
+            op_idx = self._get_idx()
+            left = self._emit_expression(expr.left)
+            right = self._emit_expression(expr.right)
+            self._emit_byte(0)
+
+            if isinstance(expr.op, ast.Add):
+                if left == int and right == int:
+                    # integer addition
+                    self._emit_byte(0x72, op_idx)
+                elif left in [str, bytes, bytearray] or right in [str, bytes, bytearray]:
+                    # string or bytes
+                    self._emit_byte(0x73, op_idx)
+                else:
+                    assert False, "invalid types"
+
+            elif isinstance(expr.op, ast.Sub):
+                assert left == int and right == int
+                self._emit_byte(0x74, op_idx)
+
+            elif isinstance(expr.op, ast.Mult):
+                assert left == int and right == int
+                self._emit_byte(0x77, op_idx)
+
+            elif isinstance(expr.op, ast.FloorDiv):
+                assert left == int and right == int
+                self._emit_byte(0x78, op_idx)
+                self._emit_byte(0) # Quotient, the other is the Remainder
+
+            elif isinstance(expr.op, ast.LShift):
+                assert left == int and right == int
+                self._emit_byte(0x79, op_idx)
+
+            elif isinstance(expr.op, ast.RShift):
+                assert left == int and right == int
+                self._emit_byte(0x7A, op_idx)
+
+            elif isinstance(expr.op, ast.BitAnd):
+                assert left == int and right == int
+                self._emit_byte(0x7B, op_idx)
+
+            elif isinstance(expr.op, ast.BitOr):
+                assert left == int and right == int
+                self._emit_byte(0x7D, op_idx)
+
+            elif isinstance(expr.op, ast.BitXor):
+                assert left == int and right == int
+                self._emit_byte(0x7F, op_idx)
+
+            elif isinstance(expr.op, ast.Mod):
+                assert left == int and right == int
+                self._emit_byte(0x85, op_idx)
+
+            else:
+                assert False, expr.op
+
+            return left
+
+        elif isinstance(expr, ast.UnaryOp):
+            if isinstance(expr.op, ast.Invert):
+                self._emit_byte(0x80)
+            elif isinstance(expr.op, ast.Not):
+                self._emit_byte(0x92)
+            else:
+                assert False, ast.dump(expr)
+
+            return self._emit_expression(expr.operand)
+
+        else:
+            assert False, ast.dump(expr, indent=4)
+
+    def _emit_statement(self, stmt):
+        if isinstance(stmt, ast.Pass):
+            pass
+
+        elif isinstance(stmt, ast.If):
+            self._emit_byte(0xA0)
+            if_pkg = self._start_pkg_length()
+            self._emit_expression(stmt.test)
+            self._emit_statements(stmt.body)
+            if_pkg()
+
+            if len(stmt.orelse) > 0:
+                self._emit_byte(0xA1)
+                else_pkg = self._start_pkg_length()
+                self._emit_statements(stmt.orelse)
+                else_pkg()
+
+        elif isinstance(stmt, ast.Return):
+            self._emit_byte(0xA4)
+            typ = self._emit_expression(stmt.value)
+            assert typ == self._compiler.resolve_path(self._func.name)[1]
+
+        elif isinstance(stmt, ast.Assign) or isinstance(stmt, ast.AnnAssign):
+            idx = self._get_idx()
+            value_type = self._emit_expression(stmt.value)
+
+            if isinstance(stmt, ast.Assign):
+                assert len(stmt.targets) == 1
+                target = stmt.targets[0]
+            else:
+                target = stmt.target
+
+            if isinstance(target, ast.Name):
+                if target.id in self._locals:
+                    if self._locals[target.id][1] is not None:
+                        assert self._locals[target.id][1] == value_type, (self._locals[target.id][1], value_type)
+                    else:
+                        self._locals[target.id][1] = value_type
+
+                if isinstance(stmt, ast.AnnAssign):
+                    typ = self._resolve_type_annotation(stmt.annotation)
+                    assert typ == value_type, (typ, value_type)
+
+            if isinstance(stmt.value, ast.BinOp):
+                # replace the last operations target with our target
+                self._compiler.buffer.pop()
+
+            else:
+                # use CopyObject to store the result
+                self._emit_byte(0x9D, idx)
+
+            # and now emit the target
+            target_type = self._emit_expression(target)
+
+            # make sure the types match
+            assert target_type == value_type, target_type == value_type
+
+        elif isinstance(stmt, ast.AugAssign):
+            # convert assignment with binop
+            self._emit_statement(ast.Assign(
+                targets=[stmt.target],
+                value=ast.BinOp(
+                    left=stmt.target,
+                    op=stmt.op,
+                    right=stmt.value
+                )
+            ))
+
+        elif isinstance(stmt, ast.While):
+            assert len(stmt.orelse) == 0
+
+            self._emit_byte(0xA2)
+            while_pkg = self._start_pkg_length()
+            self._emit_expression(stmt.test)
+            self._emit_statements(stmt.body)
+            while_pkg()
+
+        elif isinstance(stmt, ast.Expr):
+            self._emit_expression(stmt.value)
+
+        else:
+            assert False, ast.dump(stmt, indent=4)
+
+    def _emit_statements(self, stmts):
+        for stmt in stmts:
+            self._emit_statement(stmt)
+
+    def compile(self):
+        acpi_name = self._lookup_name(self._func.name)
+
+        # validate argument counts
+        assert len(self._func.args.posonlyargs) == 0
+        assert len(self._func.args.args) <= 7
+        assert self._func.args.vararg is None
+        assert len(self._func.args.kwonlyargs) == 0
+        assert len(self._func.args.kw_defaults) == 0
+        assert self._func.args.kwarg is None
+        assert len(self._func.args.defaults) == 0
+
+        # emit the method header
+        self._emit_byte(0x14)
+        method_pkg = self._start_pkg_length()
+        self._emit_name(acpi_name)
+        self._emit_byte(len(self._func.args.args))
+
+        # find all the args
+        for arg in self._func.args.args:
+            self._args[arg.arg] = (len(self._args), self._resolve_type_annotation(arg.annotation))
+
+        # find all the locals
+        for node in ast.walk(self._func):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        assert isinstance(target.ctx, ast.Store)
+                        self._locals.setdefault(target.id, [len(self._locals), None])
+            elif isinstance(node, ast.AnnAssign):
+                assert isinstance(node.target, ast.Name)
+                assert isinstance(node.target.ctx, ast.Store)
+                self._locals.setdefault(node.target.id, [len(self._locals), None])
+
+        assert len(self._locals) <= 8, "TODO: support more locals"
+
+        # emit the body
+        self._emit_statements(self._func.body)
+
+        # finish up the method
+        method_pkg()
 
 
 
-table = Table()
-table.add(Kernel)
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser('Python to AML compiler')
+    parser.add_argument('input', help='The input python file')
+    parser.add_argument('output', help='The output aml file')
+    parser.add_argument('--root', default=False, action='store_true', help='Should the code be defined at the ACPI namespace root')
+    args = parser.parse_args()
 
-open('test.aml', 'wb').write(table.pack())
-os.system('hexdump -C test.aml')
-assert os.system('iasl -d test.aml') == 0
-os.system('cat test.dsl')
+    with open(args.input) as f:
+        source = f.read()
+
+    mod_name = 'DMOD'
+    if args.root:
+        mod_name = None
+
+    c = Compiler(mod_name)
+    c.add_module(source, args.input)
+
+    with open(args.output, 'wb') as f:
+        f.write(c.pack())
+
+    # with tempfile.NamedTemporaryFile() as f:
+    os.system(f'iasl -d {args.output}')
+    os.system(f'cat {os.path.splitext(args.output)[0]}.dsl')

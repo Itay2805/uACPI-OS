@@ -17,9 +17,9 @@ OBJ_DIR			:= $(BUILD_DIR)/obj
 # Sources
 #-----------------------------------------------------------------------------------------------------------------------
 
-SRCS 		:= $(shell find . -name '*.asl')
+SRCS 		:= $(shell find . -name '*.py')
 
-$(BIN_DIR)/kernel.aml: $(SRCS)
+$(BIN_DIR)/kernel.aml: $(SRCS) ../compiler/compiler.py
 	mkdir -p $(@D)
-	iasl -p $@ -f kernel.asl
+	python3 ../compiler/compiler.py --root kernel.py $@
 

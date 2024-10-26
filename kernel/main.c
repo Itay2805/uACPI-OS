@@ -266,6 +266,9 @@ void _start() {
     // give me everything for now
     uacpi_context_set_log_level(UACPI_LOG_TRACE);
 
+    // no timeout for loops please
+    uacpi_context_set_loop_timeout(0xFFFFFFFF);
+
     // initialize the allocator
     init_page();
 
@@ -314,7 +317,7 @@ void _start() {
 
     uacpi_args args = { .count = 0, };
     uacpi_object* ret;
-    status = uacpi_eval(uacpi_namespace_root(), "\\KENT", &args, &ret);
+    status = uacpi_eval(uacpi_namespace_root(), "\\MAIN", &args, &ret);
     if (uacpi_unlikely_error(status)) {
         uacpi_error("failed to initialize kernel: %s\n", uacpi_status_to_string(status));
         goto error;
