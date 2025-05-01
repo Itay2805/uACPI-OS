@@ -49,10 +49,9 @@ CFLAGS			+= -fno-pie -fno-pic -ffreestanding -fno-builtin -static
 CFLAGS			+= -mcmodel=kernel -mno-red-zone -mgeneral-regs-only
 CFLAGS			+= -nostdlib
 CFLAGS			+= -Ikernel -Ibuild/limine -Ilibs/uACPI/include
-CFLAGS			+= -flto
+CFLAGS			+= -flto -O3
 CFLAGS			+= -g
-CFLAGS			+= -march=x86-64-v3
-CFLAGS 			+= -DUACPI_KERNEL_INITIALIZATION
+CFLAGS			+= -DLIMINE_API_REVISION=2
 
 # Debug flags
 ifeq ($(DEBUG),1)
@@ -107,10 +106,6 @@ DEPS		:= $(addprefix $(OBJ_DIR)/,$(SRCS:.c=.c.d))
 .PHONY: all
 all: $(BIN_DIR)/$(KERNEL).elf
 
-.PHONY: $(BIN_DIR)/kernel.aml
-$(BIN_DIR)/kernel.aml:
-	$(MAKE) -C acpi
-
 # Get the header deps
 -include $(DEPS)
 
@@ -151,7 +146,7 @@ IMAGE_NAME 	:= $(BIN_DIR)/$(KERNEL)
 
 # Build a limine image with both bios and uefi boot options
 .PHONY: $(IMAGE_NAME).hdd
-$(IMAGE_NAME).hdd: $(BIN_DIR)/$(KERNEL).elf $(BIN_DIR)/kernel.aml
+$(IMAGE_NAME).hdd: $(BIN_DIR)/$(KERNEL).elf
 	mkdir -p $(@D)
 	rm -f $(IMAGE_NAME).hdd
 	dd if=/dev/zero bs=1M count=0 seek=64 of=$(IMAGE_NAME).hdd
@@ -160,7 +155,6 @@ $(IMAGE_NAME).hdd: $(BIN_DIR)/$(KERNEL).elf $(BIN_DIR)/kernel.aml
 	mformat -i $(IMAGE_NAME).hdd@@1M
 	mmd -i $(IMAGE_NAME).hdd@@1M ::/EFI ::/EFI/BOOT
 	mcopy -i $(IMAGE_NAME).hdd@@1M $(BIN_DIR)/$(KERNEL).elf kernel/limine.conf $(BUILD_DIR)/limine/limine-bios.sys ::/
-	mcopy -i $(IMAGE_NAME).hdd@@1M $(BIN_DIR)/kernel.aml ::/
 	mcopy -i $(IMAGE_NAME).hdd@@1M $(BUILD_DIR)/limine/BOOTX64.EFI ::/EFI/BOOT
 
 .PHONY: run

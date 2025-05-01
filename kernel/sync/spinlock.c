@@ -1,35 +1,54 @@
+
+#include "arch/intrin.h"
+
 #include "spinlock.h"
+#include "lib/defs.h"
 
-uacpi_handle uacpi_kernel_create_spinlock(void) {
-    spinlock_t* lock = uacpi_kernel_alloc(sizeof(spinlock_t));
-    if (lock != NULL) {
-        atomic_flag_clear_explicit(&lock->flag, memory_order_relaxed);
+void spinlock_lock(spinlock_t* spinlock) {
+    for (;;) {
+        if (!atomic_exchange_explicit(&spinlock->lock, true, memory_order_acquire)) {
+            return;
+        }
+
+        while (atomic_load_explicit(&spinlock->lock, memory_order_relaxed)) {
+            cpu_relax();
+        }
     }
-    return lock;
 }
 
-void uacpi_kernel_free_spinlock(uacpi_handle lock) {
-    uacpi_kernel_free(lock);
+bool spinlock_try_lock(spinlock_t* spinlock) {
+    return !atomic_load_explicit(&spinlock->lock, memory_order_relaxed) &&
+            atomic_exchange_explicit(&spinlock->lock, true, memory_order_acquire);
 }
 
-uacpi_cpu_flags uacpi_kernel_lock_spinlock(uacpi_handle handle) {
-    // disable interrupts
-    uacpi_cpu_flags flags = __builtin_ia32_readeflags_u64();
-    if (flags & 0x0200) asm("cli");
-
-    // lock the lock
-    spinlock_t* lock = handle;
-    while (!atomic_flag_test_and_set_explicit(&lock->flag, memory_order_acquire));
-
-    return flags;
+void spinlock_unlock(spinlock_t* spinlock) {
+    atomic_store_explicit(&spinlock->lock, false, memory_order_release);
 }
 
-void uacpi_kernel_unlock_spinlock(uacpi_handle handle, uacpi_cpu_flags flags) {
-    // unlock the lock
-    spinlock_t* lock = handle;
-    atomic_flag_clear_explicit(&lock->flag, memory_order_release);
-
-    // restore the interrupt state
-    __builtin_ia32_writeeflags_u64(flags);
+bool spinlock_is_locked(spinlock_t* spinlock) {
+    return atomic_load_explicit(&spinlock->lock, memory_order_relaxed);
 }
 
+bool irq_spinlock_lock(irq_spinlock_t* spinlock) {
+    bool state = irq_save();
+    spinlock_lock(&spinlock->lock);
+    return state;
+}
+
+void irq_spinlock_unlock(irq_spinlock_t* spinlock, bool irq_state) {
+    spinlock_unlock(&spinlock->lock);
+    irq_restore(irq_state);
+}
+
+
+bool irq_save() {
+    bool status = __builtin_ia32_readeflags_u64() & BIT9;
+    asm("cli");
+    return status;
+}
+
+void irq_restore(bool status) {
+    if (status) {
+        asm("sti");
+    }
+}
