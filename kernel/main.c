@@ -21,6 +21,7 @@
 #include <thread/pcpu.h>
 #include <time/tsc.h>
 
+#include "drivers/acpi-ec.h"
 #include "thread/scheduler.h"
 #include "uacpi/event.h"
 #include "uacpi/utilities.h"
@@ -53,18 +54,22 @@ static void init_thread_entry(void* arg) {
     // we are using IOAPIC interrupt mode
     CHECK_UACPI(uacpi_set_interrupt_model(UACPI_INTERRUPT_MODEL_IOAPIC));
 
-    // TODO: initialize EC
+    // Perform early initialization of the EC
+    RETHROW(init_early_ec());
 
     // Initialize the namespace
     CHECK_UACPI(uacpi_namespace_initialize());
+
+    // And finish finalizing the EC now that the namespace is loaded
+    RETHROW(init_ec());
+
+    // TODO: setup gpes and stuff
 
     // Finalize the wakeup sources
     CHECK_UACPI(uacpi_finalize_gpe_initialization());
 
     // the rest we want
     CHECK_UACPI(uacpi_install_fixed_event_handler(UACPI_FIXED_EVENT_POWER_BUTTON, acpi_on_fixed_event, (uacpi_handle)UACPI_FIXED_EVENT_POWER_BUTTON));
-    CHECK_UACPI(uacpi_install_fixed_event_handler(UACPI_FIXED_EVENT_SLEEP_BUTTON, acpi_on_fixed_event, (uacpi_handle)UACPI_FIXED_EVENT_SLEEP_BUTTON));
-    CHECK_UACPI(uacpi_install_fixed_event_handler(UACPI_FIXED_EVENT_RTC, acpi_on_fixed_event, (uacpi_handle)UACPI_FIXED_EVENT_RTC));
 
 cleanup:
      if (IS_ERROR(err)) {

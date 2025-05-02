@@ -4,6 +4,7 @@
 
 #include "arch/apic.h"
 #include "lib/except.h"
+#include "uacpi/resources.h"
 
 #define CHECK_UACPI(status) \
     do { \

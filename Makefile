@@ -48,10 +48,13 @@ CFLAGS			+= -mgeneral-regs-only -msse2
 CFLAGS			+= -fno-pie -fno-pic -ffreestanding -fno-builtin -static
 CFLAGS			+= -mcmodel=kernel -mno-red-zone -mgeneral-regs-only
 CFLAGS			+= -nostdlib
-CFLAGS			+= -Ikernel -Ibuild/limine -Ilibs/uACPI/include -Ilibs/flanterm
+CFLAGS			+= -Ikernel -Ibuild/limine
 #CFLAGS			+= -flto -O3
 CFLAGS			+= -g
 CFLAGS			+= -DLIMINE_API_REVISION=2
+
+CFLAGS 			+= -Ilibs/uACPI/include
+CFLAGS 			+= -Ilibs/flanterm
 
 # Debug flags
 ifeq ($(DEBUG),1)
@@ -70,6 +73,13 @@ endif
 # Linker flags
 #
 LDFLAGS			:= -Tkernel/linker.ld -nostdlib -static
+
+#-----------------------------------------------------------------------------------------------------------------------
+# MicroPython
+#-----------------------------------------------------------------------------------------------------------------------
+
+#MICROPYTHON_TOP	:= libs/micropython
+#include $(MICROPYTHON_TOP)/ports/embed/embed.mk
 
 #-----------------------------------------------------------------------------------------------------------------------
 # Sources
