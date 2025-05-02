@@ -77,7 +77,15 @@ static inline thread_t* thread_ref(thread_t* thread) { thread->ref_count++; retu
 /**
 * Create a new thread, you need to schedule it yourself
 */
-thread_t* thread_create(thread_entry_t callback, void *arg, const char* name_fmt, ...);
+thread_t* thread_vcreate(thread_entry_t callback, void *arg, const char* name_fmt, va_list va);
+
+static inline thread_t* thread_create(thread_entry_t callback, void *arg, const char* name_fmt, ...) {
+    va_list va;
+    va_start(va, name_fmt);
+    thread_t* thread = thread_vcreate(callback, arg, name_fmt, va);
+    va_end(va);
+    return thread;
+}
 
 /**
  * Free the given thread, returning it to the freelist

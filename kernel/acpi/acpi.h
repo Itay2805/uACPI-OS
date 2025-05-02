@@ -16,6 +16,11 @@
  * Initialize the early acpi subsystem, should just be enough for
  * doing whatever we need to do
  */
+err_t early_init_acpi(void);
+
+/**
+ * Finalize the ACPI initialzation
+ */
 err_t init_acpi(void);
 
 uint32_t acpi_get_timer_tick(void);

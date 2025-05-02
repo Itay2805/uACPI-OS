@@ -63,17 +63,14 @@ static void thread_entry() {
     thread_exit();
 }
 
-thread_t* thread_create(thread_entry_t callback, void* arg, const char* name_fmt, ...) {
+thread_t* thread_vcreate(thread_entry_t callback, void* arg, const char* name_fmt, va_list va) {
     thread_t* thread = thread_alloc();
     if (thread == NULL) {
         return NULL;
     }
 
     // set the name
-    va_list va;
-    va_start(va, name_fmt);
-    uacpi_snprintf(thread->name, sizeof(thread->name) - 1, name_fmt, va);
-    va_end(va);
+    uacpi_snprintf(thread->name, sizeof(thread->name), name_fmt, va);
 
     // initialize the callback, this will be used by the thread_entry to
     // call the real entry point

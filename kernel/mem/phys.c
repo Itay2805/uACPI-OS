@@ -24,39 +24,49 @@ static const char* m_limine_memmap_type_str[] = {
 
 /**
  * We have a total of 16 buddy levels:
- * 0 - 4kb
- * 1 - 8kb
- * 2 - 16kb
- * 3 - 32kb
- * 4 - 64kb
- * 5 - 128kb
- * 6 - 256kb
- * 7 - 512kb
- * 8 - 1mb
- * 9 - 2mb
- * 10 - 4mb
- * 11 - 8mb
- * 12 - 16mb
- * 13 - 32mb
- * 14 - 64mb
- * 15 - 128mb
+ * 0 - 16 bytes
+ * 1 - 32 bytes
+ * 2 - 64 bytes
+ * 3 - 128 bytes
+ * 4 - 256 bytes
+ * 5 - 512 bytes
+ * 6 - 1kb
+ * 7 - 2kb
+ * 8 - 4kb
+ * 9 - 8kb
+ * 10 - 16kb
+ * 11 - 32kb
+ * 12 - 64kb
+ * 13 - 128kb
+ * 14 - 256kb
+ * 15 - 512kb
+ * 16 - 1mb
+ * 17 - 2mb
+ * 18 - 4mb
+ * 19 - 8mb
+ * 20 - 16mb
+ * 21 - 32mb
+ * 22 - 64mb
+ * 23 - 128mb
  */
-#define BUDDY_LEVEL_COUNT 16
+#define BUDDY_LEVEL_COUNT   24
+
+#define BUDDY_FIRST_LEVEL   4
 
 /**
  * The max level size
  */
-#define BUDDY_TOP_LEVEL_SIZE    (1 << ((BUDDY_LEVEL_COUNT - 1) + 12))
+#define BUDDY_TOP_LEVEL_SIZE    (1 << ((BUDDY_LEVEL_COUNT - 1) + BUDDY_FIRST_LEVEL))
 
 typedef union page_metadata {
     struct {
         // the level of the buddy
-        uint8_t level : 4;
+        uint8_t level : 5;
 
         // is this buddy free
         uint8_t free : 1;
 
-        uint8_t : 3;
+        uint8_t : 2;
     };
 
     // the raw entry
@@ -152,13 +162,6 @@ static void* allocate_from_level(memory_region_t* region, int level) {
         // the next is the new allocation
         block = freelist->next;
 
-#ifdef __DEBUG__
-        for (int i = sizeof(list_entry_t); i < 1 << (block_at_level + 12); i++) {
-            uint8_t* ptr = (uint8_t*)block;
-            ASSERT(ptr[i] == 0xAA);
-        }
-#endif
-
         // and we can remove it
         list_del(block);
         break;
@@ -173,7 +176,7 @@ static void* allocate_from_level(memory_region_t* region, int level) {
     // the requested level
     while (block_at_level > level) {
         // calculate the size
-        size_t block_size = 1 << (block_at_level + 12);
+        size_t block_size = 1 << (block_at_level + BUDDY_FIRST_LEVEL);
         block_at_level--;
 
         // split it to two, adding the higher half to the level below us
@@ -201,7 +204,7 @@ static void free_at_level(memory_region_t* region, void* ptr, int level) {
     ASSERT(level < BUDDY_LEVEL_COUNT);
     while (level < (BUDDY_LEVEL_COUNT - 1)) {
         // get the current block size
-        int block_size = 1 << (level + 12);
+        int block_size = 1 << (level + BUDDY_FIRST_LEVEL);
 
         // 1 if the neighbor is above us, -1 if it is below us
         int neighbor = ((uintptr_t)ptr & ((block_size * 2) - 1)) == 0 ? 1 : -1;
@@ -244,9 +247,6 @@ static void free_at_level(memory_region_t* region, void* ptr, int level) {
     metadata->free = true;
 
     // we now know the correct level, add the ptr to it
-#ifdef __DEBUG__
-    memset(ptr, 0xAA, 1 << (level + 12));
-#endif
     list_entry_t* ptr_entry = ptr;
     list_add(&region->free_list[level], ptr_entry);
 }
@@ -517,8 +517,8 @@ static int get_level_by_size(uint32_t size) {
     }
 
     // allocation is too small, round to 4kb
-    if (size < SIZE_4KB) {
-        size = SIZE_4KB;
+    if (size < 16) {
+        size = 16;
     }
 
     // align up to next power of two
@@ -528,7 +528,7 @@ static int get_level_by_size(uint32_t size) {
     int level = 32 - __builtin_clz(size) - 1;
 
     // ignore the first 12 levels because they are less than 4kb
-    return level - 12;
+    return level - BUDDY_FIRST_LEVEL;
 }
 
 static void* internal_phys_alloc(int level) {
@@ -568,8 +568,7 @@ static CPU_LOCAL void* m_reserved_page;
  * reserved page, and assume that it will always be enough
  */
 static void* irq_alloc(size_t size) {
-    if (m_lock_cpu == get_cpu_id()) {
-        ASSERT(size <= PAGE_SIZE);
+    if (m_lock_cpu == get_cpu_id() && size == PAGE_SIZE) {
         ASSERT(m_reserved_page != NULL);
         void* ptr = m_reserved_page;
         m_reserved_page = NULL;
@@ -584,7 +583,7 @@ static void* irq_alloc(size_t size) {
  */
 static void fill_irq_alloc() {
     if (m_reserved_page == NULL) {
-        void* page = internal_phys_alloc(0);
+        void* page = internal_phys_alloc(get_level_by_size(PAGE_SIZE));
         if (page == NULL) {
             WARN("phys: out of memory to fill the reserved pages pool");
             return;
@@ -657,7 +656,7 @@ void phys_free(void* ptr) {
     // get and verify the metadata
     page_metadata_t* metadata = page_metadata(region, ptr);
     int level = metadata->level;
-    ASSERT(((uintptr_t)ptr & ((1 << (level + 12)) - 1)) == 0);
+    ASSERT(((uintptr_t)ptr & ((1 << (level + BUDDY_FIRST_LEVEL)) - 1)) == 0);
 
     // and now actually free it
     free_at_level(region, ptr, level);

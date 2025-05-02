@@ -222,7 +222,7 @@ void _start() {
     debug_load_symbols();
 
     // we need acpi for some early sleep primitives
-    RETHROW(init_acpi());
+    RETHROW(early_init_acpi());
 
     // we need to calibrate the timer now
     init_tsc();
@@ -265,6 +265,9 @@ void _start() {
         cpu_relax();
     }
     TRACE("smp: Finished SMP startup");
+
+    // finalize the acpi init as well
+    RETHROW(init_acpi());
 
     // we are about done, create the init thread and queue it
     m_init_thread = thread_create(init_thread_entry, NULL, "init thread");

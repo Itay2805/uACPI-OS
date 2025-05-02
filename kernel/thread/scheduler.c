@@ -343,7 +343,9 @@ void scheduler_wakeup_thread(thread_t* thread) {
     list_add(&m_core.queue, &thread->scheduler_node);
     spinlock_unlock(&m_core.queue_lock);
 
-    // TODO: attempt to wakeup cores if needed
+    // wakeup the core, this ensures that
+    // we will not go back to sleep
+    m_core.park = 0;
 
     // enable preemption again
     scheduler_preempt_enable();

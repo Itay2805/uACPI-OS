@@ -81,10 +81,11 @@ static acpi_ec_t* m_boot_ec = NULL;
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 static void acpi_ec_poll(acpi_ec_t* ec, uint8_t want, uint8_t dont_want) {
-    uint64_t status;
-    do {
+    uint8_t status = __inbyte(ec->control_port);
+    while ((status & want) != want || (status & dont_want) != 0) {
+        cpu_relax();
         status = __inbyte(ec->control_port);
-    } while ((status & want) == want && (status & dont_want) == 0);
+    }
 }
 
 static void acpi_ec_write_command(acpi_ec_t* ec, uint8_t value) {
@@ -114,12 +115,6 @@ static uint8_t acpi_ec_read_data(acpi_ec_t* ec) {
 // GPE handling
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-static bool acpi_ec_get_gpe_status(acpi_ec_t* ec) {
-    uacpi_event_info event;
-    ASSERT(!uacpi_unlikely_error(uacpi_gpe_info(ec->gpe_device, ec->gpe_bit, &event)));
-    return (event & UACPI_EVENT_INFO_HW_STATUS) != 0;
-}
-
 static uacpi_status acpi_ec_op_handler(uacpi_region_op op, uacpi_handle op_data) {
     switch (op) {
         default: {
@@ -139,23 +134,13 @@ static uacpi_interrupt_ret acpi_ec_gpe_handler(uacpi_handle ctx, uacpi_namespace
 
     // get the status and check if what we need to do
     uint8_t status = __inbyte(ec->control_port);
-    TRACE("%02x", status);
-
-    // There is an event that AML needs to know about
     if (status & SCI_EVT) {
-        // Mask events, so they won't happen again
-        // until we need to handle them
-        CHECK_UACPI(uacpi_mask_gpe(ec->gpe_device, ec->gpe_bit));
-
-        // wakeup the thread to actually handle the gpe, we must be under the lock
-        // to ensure we don't queue a wakeup before
-        TRACE("WAKING UP THREAD");
+        // there is an event we need to handle, wakeup the thread to handle it
         semaphore_release(&ec->semaphore, false);
-    }
 
-    // clear the GPE status
-    if (acpi_ec_get_gpe_status(ec)) {
-        CHECK_UACPI(uacpi_clear_gpe(ec->gpe_device, ec->gpe_bit));
+    } else {
+        // nothing to do, finish handling right now
+        CHECK_UACPI(uacpi_finish_handling_gpe(ec->gpe_device, ec->gpe_bit));
     }
 
 cleanup:
@@ -179,7 +164,6 @@ static void acpi_ec_worker(void *arg) {
     while (true) {
         // wait for event
         semaphore_acquire(&ec->semaphore, false);
-        TRACE("GOT INTERRUPT!");
 
         // ensure we don't run this multiple times
         mutex_lock(&ec->lock);
@@ -201,7 +185,11 @@ static void acpi_ec_worker(void *arg) {
             acpi_ec_write_command(ec, QR_EC);
             uint8_t value = acpi_ec_read_data(ec);
 
-            TRACE("GOT QUERY %02x", value);
+            // call the method
+            char method_name[5] = "_QXX";
+            method_name[2] = "0123456789abcdef"[(value >> 4) & 0xF];
+            method_name[3] = "0123456789abcdef"[value & 0xF];
+            CHECK_UACPI(uacpi_eval(ec->node, method_name, NULL, NULL));
         }
 
         if (ec->global_lock) {
@@ -213,7 +201,7 @@ static void acpi_ec_worker(void *arg) {
 
         // unmask the GPE, so more interrupts can come, at this point another interrupt
         // may fire and we will just handle it at the next loop
-        CHECK_UACPI(uacpi_unmask_gpe(ec->gpe_device, ec->gpe_bit));
+        CHECK_UACPI(uacpi_finish_handling_gpe(ec->gpe_device, ec->gpe_bit));
     }
 
 cleanup:

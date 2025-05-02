@@ -19,10 +19,12 @@
 
 #include "arch/apic.h"
 #include "lib/cmdline.h"
+#include "mem/phys.h"
 #include "sync/mutex.h"
 #include "sync/semaphore.h"
 #include "thread/intr.h"
 #include "thread/scheduler.h"
+#include "thread/work_queue.h"
 
 /**
  * The frequency of the acpi timer
@@ -33,6 +35,11 @@
  * The timer port
  */
 static uint16_t m_acpi_timer_port;
+
+/**
+ * The work queue, used by the uacpi_kernel_schedule_work
+ */
+static work_queue_t m_acpi_work_queue;
 
 /**
  * The RSDP, saved for uACPI
@@ -141,7 +148,7 @@ ioapic_irq_t acpi_convert_isa_to_gsi(uint8_t isa_irq) {
     return entry;
 }
 
-err_t init_acpi() {
+err_t early_init_acpi() {
     err_t err = NO_ERROR;
 
     uacpi_log_level log_level = UACPI_LOG_INFO;
@@ -181,6 +188,15 @@ err_t init_acpi() {
 
     // register all the ioapic redirects
     RETHROW(register_ioapic_redirects());
+
+cleanup:
+    return err;
+}
+
+err_t init_acpi(void) {
+    err_t err = NO_ERROR;
+
+    RETHROW(init_work_queue(&m_acpi_work_queue, "acpi-work-queue"));
 
 cleanup:
     return err;
@@ -477,11 +493,23 @@ uacpi_status uacpi_kernel_uninstall_interrupt_handler(uacpi_interrupt_handler ha
 //
 
 uacpi_status uacpi_kernel_schedule_work(uacpi_work_type type, uacpi_work_handler handler, uacpi_handle ctx) {
-    TRACE("TODO: uacpi_kernel_schedule_work");
-    return UACPI_STATUS_UNIMPLEMENTED;
+    err_t err = NO_ERROR;
+
+    RETHROW(work_queue_add(&m_acpi_work_queue, handler, ctx));
+
+cleanup:
+    return err.status;
 }
 
 uacpi_status uacpi_kernel_wait_for_work_completion(void) {
-    TRACE("TODO: uacpi_kernel_wait_for_work_completion");
-    return UACPI_STATUS_UNIMPLEMENTED;
+    // poll for the work to finish, we are going to do it by reading the queue
+    // head and waiting until it has changed
+    work_queue_item_t* item = m_acpi_work_queue.head;
+    while (item != NULL && item == m_acpi_work_queue.head) {
+        cpu_relax();
+    }
+
+    // TODO: sync against interrupt as well...
+
+    return UACPI_STATUS_OK;
 }
