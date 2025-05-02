@@ -17,9 +17,11 @@
 
 #include <uacpi/uacpi.h>
 
+#include "arch/apic.h"
 #include "lib/cmdline.h"
 #include "sync/mutex.h"
 #include "sync/semaphore.h"
+#include "thread/intr.h"
 #include "thread/scheduler.h"
 
 /**
@@ -39,6 +41,105 @@ static uint64_t m_rsdp_phys;
 
 static uacpi_table m_mcfg;
 static size_t m_mcfg_entry_count = 0;
+
+typedef struct isa_override_entry {
+    uint8_t source;
+    ioapic_irq_t entry;
+} isa_override_entry_t;
+
+static isa_override_entry_t* m_isa_override_entries = NULL;
+static size_t m_isa_override_entries_count = 0;
+
+static err_t register_ioapic_redirects(void) {
+    err_t err = NO_ERROR;
+    static uacpi_table madt_table;
+    bool unref_table = false;
+
+    CHECK_UACPI(uacpi_table_find_by_signature(ACPI_MADT_SIGNATURE, &madt_table));
+    unref_table = true;
+
+    // iterate the entries
+    struct acpi_madt* madt = madt_table.ptr;
+    void* madt_end = madt_table.ptr + madt_table.hdr->length;
+
+    struct acpi_entry_hdr* hdr = &madt->entries[0];
+    while ((void*)(hdr + 1) <= madt_end) {
+        void* next_hdr = ((void*)hdr) + hdr->length;
+        if (next_hdr >= madt_end) {
+            break;
+        }
+
+        switch (hdr->type) {
+            case ACPI_MADT_ENTRY_TYPE_INTERRUPT_SOURCE_OVERRIDE: {
+                struct acpi_madt_interrupt_source_override* override = (void*)hdr;
+
+                m_isa_override_entries_count++;
+                m_isa_override_entries = mem_realloc(m_isa_override_entries, m_isa_override_entries_count * sizeof(*m_isa_override_entries));
+                CHECK_ERROR(m_isa_override_entries != NULL, UACPI_STATUS_OUT_OF_MEMORY);
+
+                m_isa_override_entries[m_isa_override_entries_count - 1].source = override->source;
+
+                bool assertion_level;
+                const char* assertion_level_str;
+                if ((override->flags & ACPI_MADT_POLARITY_MASK) == ACPI_MADT_POLARITY_CONFORMING) { assertion_level = false; assertion_level_str = "dfl"; }
+                else if ((override->flags & ACPI_MADT_POLARITY_MASK) == ACPI_MADT_POLARITY_ACTIVE_HIGH) { assertion_level = true; assertion_level_str = "high"; }
+                else if ((override->flags & ACPI_MADT_POLARITY_MASK) == ACPI_MADT_POLARITY_ACTIVE_LOW) { assertion_level = false; assertion_level_str = "low"; }
+                else CHECK_FAIL();
+
+                bool level_triggered;
+                const char* level_trigger_str;
+                if ((override->flags & ACPI_MADT_TRIGGERING_MASK) == ACPI_MADT_TRIGGERING_CONFORMING) { level_triggered = true; level_trigger_str = "dfl"; }
+                else if ((override->flags & ACPI_MADT_TRIGGERING_MASK) == ACPI_MADT_TRIGGERING_LEVEL) { level_triggered = true; level_trigger_str = "level"; }
+                else if ((override->flags & ACPI_MADT_TRIGGERING_MASK) == ACPI_MADT_TRIGGERING_EDGE) { level_triggered = false; level_trigger_str = "edge"; }
+                else CHECK_FAIL();
+
+                TRACE("acpi: INT_SRC_OVR (bus %d bus_irq %d global_irq %d %s %s)",
+                    override->bus, override->source, override->gsi, assertion_level_str, level_trigger_str);
+
+                if (override->bus == 0) {
+                    m_isa_override_entries[m_isa_override_entries_count - 1].entry = (ioapic_irq_t){
+                        .irq = override->gsi,
+                        .assertion_level = assertion_level,
+                        .level_triggered = level_triggered,
+                    };
+                }
+            } break;
+
+            case ACPI_MADT_ENTRY_TYPE_IOAPIC: {
+                struct acpi_madt_ioapic* ioapic = (void*)hdr;
+                RETHROW(ioapic_add(ioapic->address, ioapic->gsi_base));
+            } break;
+        }
+
+        hdr = next_hdr;
+    }
+
+cleanup:
+    if (unref_table) {
+        uacpi_table_unref(&madt_table);
+    }
+
+    return err;
+}
+
+ioapic_irq_t acpi_convert_isa_to_gsi(uint8_t isa_irq) {
+    // ISA bus is level-triggered, active-low by default
+    ioapic_irq_t entry = (ioapic_irq_t){
+        .irq = isa_irq,
+        .level_triggered = false,
+        .assertion_level = false,
+    };
+
+    // search for an override entry for this isa irq
+    for (int i = 0; i < m_isa_override_entries_count; i++) {
+        if (m_isa_override_entries[i].source == isa_irq) {
+            entry = m_isa_override_entries[i].entry;
+            break;
+        }
+    }
+
+    return entry;
+}
 
 err_t init_acpi() {
     err_t err = NO_ERROR;
@@ -77,6 +178,9 @@ err_t init_acpi() {
     // get the pcie mappings and save the count
     CHECK_UACPI(uacpi_table_find_by_signature(ACPI_MCFG_SIGNATURE, &m_mcfg));
     m_mcfg_entry_count = (m_mcfg.hdr->length - sizeof(struct acpi_mcfg)) / sizeof(struct acpi_mcfg_allocation);
+
+    // register all the ioapic redirects
+    RETHROW(register_ioapic_redirects());
 
 cleanup:
     return err;
@@ -273,6 +377,9 @@ uacpi_status uacpi_kernel_io_write32(uacpi_handle base, uacpi_size offset, uacpi
 //
 
 void* uacpi_kernel_map(uacpi_phys_addr addr, uacpi_size len) {
+    uint64_t addr_end;
+    if (__builtin_add_overflow(addr, len, &addr_end)) return NULL;
+    if (addr_end >= DIRECT_MAP_SIZE) return NULL;
     return PHYS_TO_DIRECT(addr);
 }
 
@@ -325,14 +432,42 @@ void uacpi_kernel_free(void *mem) {
 // Interrupts
 //
 
-uacpi_status uacpi_kernel_install_interrupt_handler(uacpi_u32 irq, uacpi_interrupt_handler handler, uacpi_handle ctx, uacpi_handle *out_irq_handle) {
-    TRACE("TODO: uacpi_kernel_install_interrupt_handler");
-    return UACPI_STATUS_OK;
+typedef struct uacpi_interrupt_handler {
+    interrupt_handler_t handler;
+    uacpi_interrupt_handler func;
+    uacpi_handle ctx;
+} uacpi_interrupt_handler_t;
+
+static void uacpi_interrupt_wrapper(interrupt_handler_t* _ctx) {
+    uacpi_interrupt_handler_t* handler = containerof(_ctx, uacpi_interrupt_handler_t, handler);
+    handler->func(handler->ctx);
+}
+
+uacpi_status uacpi_kernel_install_interrupt_handler(uacpi_u32 irq, uacpi_interrupt_handler handler, uacpi_handle ctx, uacpi_handle* out_irq_handle) {
+    err_t err = NO_ERROR;
+
+    uacpi_interrupt_handler_t* irq_handler = mem_alloc(sizeof(*irq_handler));
+    CHECK_ERROR(irq_handler != NULL, UACPI_STATUS_OUT_OF_MEMORY);
+
+    // setup the struct correctly
+    irq_handler->handler.handler = uacpi_interrupt_wrapper;
+    irq_handler->func = handler;
+    irq_handler->ctx = ctx;
+
+    // allocate the irq vector
+    RETHROW(irq_allocate(&irq_handler->handler));
+
+    // map the source to the irq
+    ioapic_irq_t gsi = acpi_convert_isa_to_gsi(irq);
+    RETHROW(ioapic_configure_irq(&gsi, irq_handler->handler.vector, 0));
+
+cleanup:
+    return err.status;
 }
 
 uacpi_status uacpi_kernel_uninstall_interrupt_handler(uacpi_interrupt_handler handler, uacpi_handle irq_handle) {
     TRACE("TODO: uacpi_kernel_uninstall_interrupt_handler");
-    return UACPI_STATUS_OK;
+    return UACPI_STATUS_UNIMPLEMENTED;
 }
 
 //

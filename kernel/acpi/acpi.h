@@ -1,6 +1,8 @@
 #pragma once
 
 #include <stdint.h>
+
+#include "arch/apic.h"
 #include "lib/except.h"
 
 #define CHECK_UACPI(status) \
@@ -21,3 +23,8 @@ uint32_t acpi_get_timer_tick(void);
  * Stall for the given amount of NS
  */
 void acpi_stall(uint64_t ns);
+
+/**
+ * Convert an ISA IRQ into a GSI value.
+ */
+ioapic_irq_t acpi_convert_isa_to_gsi(uint8_t isa_irq);

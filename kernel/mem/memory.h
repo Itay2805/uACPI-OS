@@ -23,7 +23,9 @@
 /**
  * Direct map offset, static in memory, no KASLR please
  */
-#define DIRECT_MAP_OFFSET       0xFFFF800000000000ULL
+#define DIRECT_MAP_START        0xFFFF800000000000ULL
+#define DIRECT_MAP_END          0xFFFF808000000000ULL
+#define DIRECT_MAP_SIZE         (DIRECT_MAP_END - DIRECT_MAP_START)
 
 /**
  * The bottom of the stack allocator
@@ -37,8 +39,8 @@
 /**
  * Convert direct map pointers as required
  */
-#define PHYS_TO_DIRECT(x) (void*)((uintptr_t)(x) + DIRECT_MAP_OFFSET)
-#define DIRECT_TO_PHYS(x) (uintptr_t)((uintptr_t)(x) - DIRECT_MAP_OFFSET)
+#define PHYS_TO_DIRECT(x) (void*)((uintptr_t)(x) + DIRECT_MAP_START)
+#define DIRECT_TO_PHYS(x) (uintptr_t)((uintptr_t)(x) - DIRECT_MAP_START)
 
 // page size is 4k
 #define PAGE_SIZE   SIZE_4KB

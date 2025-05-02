@@ -17,7 +17,7 @@ static volatile LIMINE_REQUESTS_START_MARKER;
 __attribute__((section(".limine_requests")))
 volatile struct limine_framebuffer_request g_limine_framebuffer_request = {
     .id = LIMINE_FRAMEBUFFER_REQUEST,
-    .revision = 0, .response = NULL
+    .revision = 0, .response = NULL,
 };
 
 

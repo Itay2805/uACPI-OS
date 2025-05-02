@@ -119,25 +119,8 @@ static void scheduler_call(scheduler_func_t callback) {
 // Core sleeping and waking up
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-static void core_wait(void) {
-    // set up the monitor
-    __monitor((uintptr_t)&m_core.park, 0, 0);
-
-    // ensure again that nothing changed
-    if (atomic_load_explicit(&m_core.park, memory_order_acquire) != 0) {
-        return;
-    }
-
-    // and now wait for the memory write
-    __mwait(0, 0);
-}
-
 static void core_prepare_park(void) {
     atomic_store_explicit(&m_core.park, 1, memory_order_relaxed);
-}
-
-static bool core_timed_out(void) {
-    return atomic_load_explicit(&m_core.park, memory_order_relaxed) != 0;
 }
 
 static void core_park(void) {
@@ -147,7 +130,7 @@ static void core_park(void) {
 
     // and now wait until someone tells us to wakeup
     while (atomic_load_explicit(&m_core.park, memory_order_acquire) != 0) {
-        core_wait();
+        asm("hlt");
     }
 }
 

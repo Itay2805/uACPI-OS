@@ -35,7 +35,7 @@ static uint32_t calculate_tsc() {
         // check that we have the ratio and the hz
         if (b != 0 && c != 0) {
             TRACE("timer: TSC Calculated from CPUID");
-            return c * (b / c);
+            return c * (b / a);
         }
     }
 
@@ -54,4 +54,5 @@ static uint32_t calculate_tsc() {
 void init_tsc() {
     g_tsc_freq_hz = calculate_tsc();
     TRACE("timer: TSC frequency %luMHz", g_tsc_freq_hz / 1000000);
+    ASSERT(g_tsc_freq_hz != 0);
 }

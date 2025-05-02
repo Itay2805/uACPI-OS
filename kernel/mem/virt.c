@@ -44,7 +44,7 @@ err_t init_virt_early() {
 
     // make sure the HHDM is at the correct address
     CHECK(g_limine_hhdm_request.response != NULL);
-    CHECK(g_limine_hhdm_request.response->offset == DIRECT_MAP_OFFSET);
+    CHECK(g_limine_hhdm_request.response->offset == DIRECT_MAP_START);
 
 cleanup:
     return err;
@@ -279,37 +279,6 @@ err_t init_virt() {
         RETHROW(virt_map_range(paddr, vaddr, page_num, flags));
     }
 
-    // initialize the first 16TB range with top level addressing, this is used later
-    // to create RO shadows used by the GC while we are tracing the heap
-    for (int i = 0; i < SIZE_16TB / SIZE_512GB; i++) {
-        uintptr_t virt = DIRECT_MAP_OFFSET + i * SIZE_512GB;
-
-        page_entry_t* pml4 = &m_cr3[PML4_INDEX(virt)];
-        page_entry_t* shadow_pml4 = &m_cr3[PML4_INDEX(virt + SIZE_16TB)];
-
-        // allocate the pml4 if needed
-        if (!pml4->present) {
-            void* page = phys_alloc(PAGE_SIZE);
-            CHECK_ERROR(page != NULL, UACPI_STATUS_OUT_OF_MEMORY);
-            memset(page, 0, SIZE_4KB);
-
-            // this whole area is non-executable, so mark it at the top as such
-            pml4->present = 1;
-            pml4->writeable = 1;
-            pml4->no_execute = 1;
-            pml4->frame = DIRECT_TO_PHYS(page) >> 12;
-        }
-
-        // copy the shadow
-        *shadow_pml4 = *pml4;
-
-        // the GC heap area is also marked as non-writable in the shadow, this is used
-        // as a GC barrier while the GC is running in parallel to mutators
-        if (0xFFFF810000000000 <= virt && virt < 0xFFFF8E8000000000) {
-            shadow_pml4->writeable = 0;
-        }
-    }
-
 cleanup:
     return err;
 }
@@ -334,9 +303,10 @@ bool virt_handle_page_fault(uintptr_t addr) {
         // stack
         CHECK(ALIGN_DOWN(addr, SIZE_8MB) + SIZE_2MB <= addr);
 
-    } else if (DIRECT_MAP_OFFSET <= addr && addr < DIRECT_MAP_OFFSET + SIZE_512GB) {
-        // direct map will read pages on demand
-        RETHROW(virt_map_page(DIRECT_TO_PHYS(addr), addr & ~PAGE_MASK, MAP_PERM_W));
+    } else if (DIRECT_MAP_START <= addr && addr < DIRECT_MAP_END) {
+        // direct map will map pages on demand
+        addr &= ~PAGE_MASK;
+        RETHROW(virt_map_page(DIRECT_TO_PHYS(addr), addr, MAP_PERM_W));
         return true;
 
     } else {

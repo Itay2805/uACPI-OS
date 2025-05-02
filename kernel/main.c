@@ -23,11 +23,24 @@
 
 #include "thread/scheduler.h"
 #include "uacpi/event.h"
+#include "uacpi/utilities.h"
 
 /**
  * The init thread
  */
 static thread_t* m_init_thread;
+
+static uacpi_interrupt_ret acpi_on_fixed_event(uacpi_handle ctx) {
+    const char* fixed_event = "<unknown>";
+    switch ((uintptr_t)ctx) {
+        case UACPI_FIXED_EVENT_TIMER_STATUS: fixed_event = "Timer"; break;
+        case UACPI_FIXED_EVENT_POWER_BUTTON: fixed_event = "Power button"; break;
+        case UACPI_FIXED_EVENT_SLEEP_BUTTON: fixed_event = "Sleep button"; break;
+        case UACPI_FIXED_EVENT_RTC: fixed_event = "RTC"; break;
+    }
+    TRACE("Got fixed event: %s", fixed_event);
+    return UACPI_INTERRUPT_HANDLED;
+}
 
 static void init_thread_entry(void* arg) {
      err_t err = NO_ERROR;
@@ -37,11 +50,21 @@ static void init_thread_entry(void* arg) {
     // Load the AML namespace
     CHECK_UACPI(uacpi_namespace_load());
 
+    // we are using IOAPIC interrupt mode
+    CHECK_UACPI(uacpi_set_interrupt_model(UACPI_INTERRUPT_MODEL_IOAPIC));
+
+    // TODO: initialize EC
+
     // Initialize the namespace
     CHECK_UACPI(uacpi_namespace_initialize());
 
     // Finalize the wakeup sources
     CHECK_UACPI(uacpi_finalize_gpe_initialization());
+
+    // the rest we want
+    CHECK_UACPI(uacpi_install_fixed_event_handler(UACPI_FIXED_EVENT_POWER_BUTTON, acpi_on_fixed_event, (uacpi_handle)UACPI_FIXED_EVENT_POWER_BUTTON));
+    CHECK_UACPI(uacpi_install_fixed_event_handler(UACPI_FIXED_EVENT_SLEEP_BUTTON, acpi_on_fixed_event, (uacpi_handle)UACPI_FIXED_EVENT_SLEEP_BUTTON));
+    CHECK_UACPI(uacpi_install_fixed_event_handler(UACPI_FIXED_EVENT_RTC, acpi_on_fixed_event, (uacpi_handle)UACPI_FIXED_EVENT_RTC));
 
 cleanup:
      if (IS_ERROR(err)) {

@@ -10,6 +10,14 @@
 
 #include "intrin.h"
 #include "acpi/acpi.h"
+#include "mem/alloc.h"
+#include "sync/spinlock.h"
+#include "thread/intr.h"
+#include "thread/pcpu.h"
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// LAPIC driver
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #define XAPIC_ID_OFFSET                          0x20
 #define XAPIC_VERSION_OFFSET                     0x30
@@ -141,6 +149,12 @@ static uint32_t calculate_lapic_freq() {
 err_t init_lapic(void) {
     err_t err = NO_ERROR;
 
+    // we are going to use 0xFF as the spurious interrupt vector
+    ASSERT(!IS_ERROR(irq_reserve(0xFF)));
+
+    // we are going to use 0x20 as the timer handler
+    ASSERT(!IS_ERROR(irq_reserve(0x20)));
+
     // check the apic state
     MSR_IA32_APIC_BASE_REGISTER apic_base = { .packed = __rdmsr(MSR_IA32_APIC_BASE) };
     CHECK(apic_base.en);
@@ -215,4 +229,160 @@ void lapic_timer_set_timeout(uint64_t ms_timeout) {
 
 void lapic_timer_clear(void) {
     lapic_write(XAPIC_TIMER_INIT_COUNT_OFFSET, 0);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// IOAPIC driver
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+#define IOAPIC_INDEX_OFFSET 0x00
+#define IOAPIC_DATA_OFFSET  0x10
+
+#define IOAPIC_IDENTIFICATION_REGISTER_INDEX 0x00
+#define IOAPIC_VERSION_REGISTER_INDEX 0x01
+#define IOAPIC_REDIRECTION_TABLE_ENTRY_INDEX 0x10
+
+typedef union IOAPIC_VERSION_REGISTER {
+    struct {
+        uint8_t version;
+        uint8_t : 8;
+        uint8_t maximum_redirection_entry;
+        uint8_t : 8;
+    };
+    uint32_t packed;
+} PACKED IOAPIC_VERSION_REGISTER;
+
+typedef union IOAPIC_REDIRECTION_TABLE_ENTRY {
+    struct {
+        uint64_t vector : 8;
+        uint64_t delivery_mode : 3;
+        uint64_t destination_mode : 1;
+        uint64_t delivery_status : 1;
+        uint64_t polarity : 1;
+        uint64_t remote_irr : 1;
+        uint64_t trigger_mode : 1;
+        uint64_t mask : 1;
+        uint64_t : 39;
+        uint64_t destination_id : 8;
+    };
+    struct {
+        uint32_t packed_low;
+        uint32_t packed_high;
+    };
+} PACKED IOAPIC_REDIRECTION_TABLE_ENTRY;
+STATIC_ASSERT(sizeof(IOAPIC_REDIRECTION_TABLE_ENTRY) == sizeof(uint64_t));
+
+typedef struct ioapic {
+    uint32_t gsi_start;
+    uint32_t gsi_end;
+    void* address;
+    irq_spinlock_t irq;
+} ioapic_t;
+
+static ioapic_t* m_ioapics = NULL;
+static size_t m_ioapic_count = 0;
+
+static uint32_t ioapic_read(ioapic_t* ioapic, uint8_t offset) {
+    *(volatile uint8_t*)(ioapic->address + IOAPIC_INDEX_OFFSET) = offset;
+    uint32_t data = *(volatile uint32_t*)(ioapic->address + IOAPIC_DATA_OFFSET);
+    return data;
+}
+
+static void ioapic_write(ioapic_t* ioapic, uint8_t offset, uint32_t value) {
+    *(volatile uint8_t*)(ioapic->address + IOAPIC_INDEX_OFFSET) = offset;
+    *(volatile uint32_t*)(ioapic->address + IOAPIC_DATA_OFFSET) = value;
+}
+
+err_t ioapic_add(uint64_t base_address, uint32_t gsi_base) {
+    err_t err = NO_ERROR;
+
+    m_ioapic_count++;
+    m_ioapics = mem_realloc(m_ioapics, m_ioapic_count * sizeof(ioapic_t));
+    ioapic_t* ioapic = &m_ioapics[m_ioapic_count - 1];
+    ioapic->address = PHYS_TO_DIRECT(base_address);
+
+    IOAPIC_VERSION_REGISTER version = { .packed = ioapic_read(ioapic, IOAPIC_VERSION_REGISTER_INDEX) };
+    CHECK(version.maximum_redirection_entry <= 0xF0);
+
+    ioapic->gsi_start = gsi_base;
+    ioapic->gsi_end = gsi_base + version.maximum_redirection_entry;
+
+    TRACE("IOAPIC[%ld]: apic_id %d, version %d, address 0x%lx, GSI %d-%d",
+        m_ioapic_count - 1,
+        (ioapic_read(ioapic, IOAPIC_IDENTIFICATION_REGISTER_INDEX) >> 24) & 0xF,
+        version.version, DIRECT_TO_PHYS(ioapic->address), ioapic->gsi_start, ioapic->gsi_end
+    );
+
+cleanup:
+    return err;
+}
+
+static ioapic_t* get_ioapic(uint32_t gsi) {
+    for (int i = 0; i < m_ioapic_count; i++) {
+        ioapic_t* ioapic = &m_ioapics[i];
+        if (ioapic->gsi_start <= gsi && gsi < ioapic->gsi_end) {
+            return ioapic;
+        }
+    }
+    return NULL;
+}
+
+err_t ioapic_enable_irq(uint32_t irq, bool enable) {
+    err_t err = NO_ERROR;
+    bool locked = false;
+
+    ioapic_t* ioapic = get_ioapic(irq);
+    CHECK(ioapic != NULL);
+
+    bool status = irq_spinlock_lock(&ioapic->irq);
+    locked = true;
+
+    IOAPIC_REDIRECTION_TABLE_ENTRY entry = { .packed_low = ioapic_read(ioapic, IOAPIC_REDIRECTION_TABLE_ENTRY_INDEX + irq * 2) };
+    entry.mask = enable ? 0 : 1;
+    ioapic_write(ioapic, IOAPIC_REDIRECTION_TABLE_ENTRY_INDEX + irq * 2, entry.packed_low);
+
+cleanup:
+    if (locked) {
+        irq_spinlock_unlock(&ioapic->irq, status);
+    }
+
+    return err;
+}
+
+err_t ioapic_configure_irq(ioapic_irq_t* irq, uint8_t vector, uint8_t cpu) {
+    err_t err = NO_ERROR;
+    bool locked = false;
+
+    ioapic_t* ioapic = get_ioapic(irq->irq);
+    CHECK(ioapic != NULL);
+
+    bool status = irq_spinlock_lock(&ioapic->irq);
+    locked = true;
+
+    IOAPIC_REDIRECTION_TABLE_ENTRY entry = {
+        // physical cpu at the given id
+        .destination_mode = 0,
+        .destination_id = cpu,
+
+        // fixed delivery
+        .delivery_mode = IOAPIC_DELIVERY_MODE_FIXED,
+        .vector = vector,
+
+        // the line config
+        .polarity = irq->assertion_level ? 0 : 1,
+        .trigger_mode = irq->level_triggered ? 1 : 0,
+
+        // masked or not
+        .mask = false,
+    };
+
+    ioapic_write(ioapic, IOAPIC_REDIRECTION_TABLE_ENTRY_INDEX + irq->irq * 2, entry.packed_low);
+    ioapic_write(ioapic, IOAPIC_REDIRECTION_TABLE_ENTRY_INDEX + irq->irq * 2 + 1, entry.packed_high);
+
+cleanup:
+    if (locked) {
+        irq_spinlock_unlock(&ioapic->irq, status);
+    }
+
+    return err;
 }

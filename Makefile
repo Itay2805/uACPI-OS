@@ -48,8 +48,8 @@ CFLAGS			+= -mgeneral-regs-only -msse2
 CFLAGS			+= -fno-pie -fno-pic -ffreestanding -fno-builtin -static
 CFLAGS			+= -mcmodel=kernel -mno-red-zone -mgeneral-regs-only
 CFLAGS			+= -nostdlib
-CFLAGS			+= -Ikernel -Ibuild/limine -Ilibs/uACPI/include
-CFLAGS			+= -flto -O3
+CFLAGS			+= -Ikernel -Ibuild/limine -Ilibs/uACPI/include -Ilibs/flanterm
+#CFLAGS			+= -flto -O3
 CFLAGS			+= -g
 CFLAGS			+= -DLIMINE_API_REVISION=2
 
@@ -77,6 +77,9 @@ LDFLAGS			:= -Tkernel/linker.ld -nostdlib -static
 
 # Get list of source files
 SRCS 		:= $(shell find kernel -name '*.c')
+
+SRCS		+= libs/flanterm/flanterm.c
+SRCS		+= libs/flanterm/backends/fb.c
 
 SRCS		+= libs/uACPI/source/tables.c
 SRCS		+= libs/uACPI/source/types.c
@@ -145,20 +148,20 @@ $(BUILD_DIR)/limine:
 IMAGE_NAME 	:= $(BIN_DIR)/$(KERNEL)
 
 # Build a limine image with both bios and uefi boot options
-.PHONY: $(IMAGE_NAME).hdd
-$(IMAGE_NAME).hdd: $(BIN_DIR)/$(KERNEL).elf
+.PHONY: $(IMAGE_NAME).img
+$(IMAGE_NAME).img: $(BIN_DIR)/$(KERNEL).elf
 	mkdir -p $(@D)
-	rm -f $(IMAGE_NAME).hdd
-	dd if=/dev/zero bs=1M count=0 seek=64 of=$(IMAGE_NAME).hdd
-	sgdisk $(IMAGE_NAME).hdd -n 1:2048 -t 1:ef00
-	./$(BUILD_DIR)/limine/limine bios-install $(IMAGE_NAME).hdd
-	mformat -i $(IMAGE_NAME).hdd@@1M
-	mmd -i $(IMAGE_NAME).hdd@@1M ::/EFI ::/EFI/BOOT
-	mcopy -i $(IMAGE_NAME).hdd@@1M $(BIN_DIR)/$(KERNEL).elf kernel/limine.conf $(BUILD_DIR)/limine/limine-bios.sys ::/
-	mcopy -i $(IMAGE_NAME).hdd@@1M $(BUILD_DIR)/limine/BOOTX64.EFI ::/EFI/BOOT
+	rm -f $(IMAGE_NAME).img
+	dd if=/dev/zero bs=1M count=0 seek=64 of=$(IMAGE_NAME).img
+	sgdisk $(IMAGE_NAME).img -n 1:2048 -t 1:ef00
+	./$(BUILD_DIR)/limine/limine bios-install $(IMAGE_NAME).img
+	mformat -i $(IMAGE_NAME).img@@1M
+	mmd -i $(IMAGE_NAME).img@@1M ::/EFI ::/EFI/BOOT
+	mcopy -i $(IMAGE_NAME).img@@1M $(BIN_DIR)/$(KERNEL).elf kernel/limine.conf $(BUILD_DIR)/limine/limine-bios.sys ::/
+	mcopy -i $(IMAGE_NAME).img@@1M $(BUILD_DIR)/limine/BOOTX64.EFI ::/EFI/BOOT
 
 .PHONY: run
-run: $(IMAGE_NAME).hdd
+run: $(IMAGE_NAME).img
 	qemu-system-x86_64 \
 		--enable-kvm \
 		-cpu host,+invtsc,+tsc-deadline \
@@ -166,7 +169,7 @@ run: $(IMAGE_NAME).hdd
 		-m 2G \
 		-smp 4 \
 		-s \
-		-hda $(IMAGE_NAME).hdd \
+		-hda $(IMAGE_NAME).img \
 		-debugcon stdio \
 		-no-reboot \
 	 	-no-shutdown

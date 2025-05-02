@@ -1,3 +1,6 @@
 [submodule "libs/uACPI"]
 	path = libs/uACPI
 	url = git@github.com:UltraOS/uACPI.git
+[submodule "libs/flanterm"]
+	path = libs/flanterm
+	url = https://codeberg.org/mintsuki/flanterm.git
