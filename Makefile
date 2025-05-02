@@ -54,7 +54,7 @@ CFLAGS			+= -g
 CFLAGS			+= -DLIMINE_API_REVISION=2
 
 CFLAGS 			+= -Ilibs/uACPI/include
-CFLAGS 			+= -Ilibs/flanterm
+CFLAGS 			+= -Ilibs/flanterm -DFLANTERM_FB_DISABLE_BUMP_ALLOC
 
 # Debug flags
 ifeq ($(DEBUG),1)

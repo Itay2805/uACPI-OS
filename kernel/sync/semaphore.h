@@ -1,20 +1,27 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
-#include "condvar.h"
-#include "mutex.h"
+#include "spinlock.h"
+#include "lib/list.h"
 
 typedef struct semaphore {
-    uint64_t value;
-    mutex_t mutex;
-    condvar_t condition;
+    // the semaphore value
+    _Atomic(uint32_t) value;
+
+    // the number of waiters
+    _Atomic(uint32_t) num_waiters;
+
+    // the queue lock, uses irq spinlock
+    // so it can be used from interrupt
+    // context as well
+    irq_spinlock_t lock;
+
+    // the wait queue
+    list_t wait_queue;
 } semaphore_t;
 
-#define INIT_SEMAPHORE()  ((semaphore_t){ .value = 0, .mutex = INIT_MUTEX(), .condition = INIT_CONDVAR() })
+void semaphore_acquire(semaphore_t* sema, bool lifo);
 
-void semaphore_signal(semaphore_t* semaphore);
-
-bool semaphore_wait_until(semaphore_t* semaphore, uint64_t tsc_deadline);
-
-void semaphore_reset(semaphore_t* semaphore);
+void semaphore_release(semaphore_t* sema, bool handoff);

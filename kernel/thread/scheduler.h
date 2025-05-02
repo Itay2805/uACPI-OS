@@ -19,6 +19,11 @@ err_t scheduler_init_per_core(void);
  */
 void scheduler_start_per_core(void);
 
+/**
+ * Is the scheduler allowing a sync primitive to spin
+ */
+bool scheduler_can_spin(size_t i);
+
 //----------------------------------------------------------------------------------------------------------------------
 // Primitives over any thread
 //----------------------------------------------------------------------------------------------------------------------
@@ -50,7 +55,7 @@ void scheduler_yield(void);
 /**
  * Park the current thread
  */
-void scheduler_park(void);
+void scheduler_park(scheduler_park_callback_t callback, void* ctx);
 
 /**
  * Park the current thread

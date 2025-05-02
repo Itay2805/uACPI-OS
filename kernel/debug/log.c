@@ -15,6 +15,9 @@
 #include "uacpi/internal/stdlib.h"
 #include "flanterm.h"
 #include "backends/fb.h"
+#include "mem/alloc.h"
+#include "mem/memory.h"
+#include "mem/phys.h"
 
 static irq_spinlock_t m_debug_lock = INIT_IRQ_SPINLOCK();
 
@@ -25,17 +28,22 @@ static bool m_e9_enabled = false;
 void init_early_logging() {
     // detect e9 support
     m_e9_enabled = __inbyte(0xE9) == 0xE9;
+}
 
-    // initialize the framebuffer
+static void sized_mem_free(void* ptr, size_t size) {
+    // mem_free(ptr);
+}
 
+
+void init_logging(void) {
     // framebuffer
     struct limine_framebuffer_response* response = g_limine_framebuffer_request.response;
     if (response != NULL && response->framebuffer_count >= 1) {
         struct limine_framebuffer* framebuffer = response->framebuffers[0];
         TRACE("Using framebuffer #0 - %p - %ldx%ld (pitch=%ld)", framebuffer->address, framebuffer->width, framebuffer->height, framebuffer->pitch);
         m_flanterm_context = flanterm_fb_init(
-            NULL,
-            NULL,
+            mem_alloc,
+            sized_mem_free,
             framebuffer->address, framebuffer->width, framebuffer->height, framebuffer->pitch,
             framebuffer->red_mask_size, framebuffer->red_mask_shift,
             framebuffer->green_mask_size, framebuffer->green_mask_shift,
@@ -48,6 +56,7 @@ void init_early_logging() {
             0, 0,
             0
         );
+        TRACE("HAS TERMINAL %p", m_flanterm_context);
     }
 }
 

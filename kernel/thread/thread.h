@@ -7,22 +7,36 @@
 
 #include <stdatomic.h>
 #include <lib/list.h>
-#include <sync/parking_lot.h>
 #include <sync/spinlock.h>
 
 #include "runnable.h"
 
 typedef void (*thread_entry_t)(void *arg);
 
-typedef struct thread {
+typedef enum thread_status {
+    THREAD_STATUS_IDLE,
+    THREAD_STATUS_RUNNABLE,
+    THREAD_STATUS_RUNNING,
+    THREAD_STATUS_WAITING,
+    THREAD_STATUS_DEAD,
+} thread_status_t;
+
+typedef struct thread thread_t;
+
+typedef bool (*scheduler_park_callback_t)(thread_t* thread, void* ctx);
+
+struct thread {
     // The thread name, not null terminated
     char name[256];
 
+    // link in a list of active threads
+    list_entry_t link;
+
+    // the ref-count on the thread
+    atomic_size_t ref_count;
+
     // the runnable of this thread, to queue on the scheduler
     runnable_t runnable;
-
-    // either a freelist link or the scheduler link
-    list_t link;
 
     // The actual stack of the thread
     void* stack_top;
@@ -32,37 +46,33 @@ typedef struct thread {
     thread_entry_t entry;
 
     // The node for the scheduler
+    // when waiting used by the wait structure
     list_entry_t scheduler_node;
 
-    //
-    // Parking lot context
-    //
+    // the notify list link
+    struct thread* notify_next;
 
-    // The key that this thread is sleeping on. This may change if the thread
-    // is requeued to a different key
-    _Atomic(size_t) park_key;
+    // the ticket passed to the
+    // semaphore we are waiting on
+    uint32_t ticket;
 
-    // The next thread in the parked queue
-    struct thread* park_next_in_queue;
+    // the status of the thread
+    _Atomic(thread_status_t) status;
 
-    // Token passed to this thread when it is unparked
-    size_t unpark_token;
+    // for parking
+    scheduler_park_callback_t park_callback;
+    void* park_arg;
+};
 
-    // Token set by the thread when it is parked
-    size_t park_token;
+/**
+ * Dump the current threads
+ */
+void thread_dump(void);
 
-    // Is this thread parked with timeout
-    bool parked_with_timeout;
-
-    // parking lot has seen this thread and initialized itself accordingly
-    bool parking_lot_seen;
-
-    // used to prevent threads from
-    // waking up before time
-    atomic_flag park_lock;
-} __attribute__((aligned(4096))) thread_t;
-
-STATIC_ASSERT(sizeof(thread_t) <= SIZE_8MB);
+/**
+ * Increment the ref count of the thread
+ */
+static inline thread_t* thread_ref(thread_t* thread) { thread->ref_count++; return thread; }
 
 /**
 * Create a new thread, you need to schedule it yourself

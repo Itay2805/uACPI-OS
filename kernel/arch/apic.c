@@ -373,7 +373,7 @@ err_t ioapic_configure_irq(ioapic_irq_t* irq, uint8_t vector, uint8_t cpu) {
         .trigger_mode = irq->level_triggered ? 1 : 0,
 
         // masked or not
-        .mask = false,
+        .mask = true,
     };
 
     ioapic_write(ioapic, IOAPIC_REDIRECTION_TABLE_ENTRY_INDEX + irq->irq * 2, entry.packed_low);

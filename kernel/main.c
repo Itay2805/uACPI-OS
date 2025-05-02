@@ -21,7 +21,8 @@
 #include <thread/pcpu.h>
 #include <time/tsc.h>
 
-#include "drivers/acpi-ec.h"
+#include "drivers/driver.h"
+#include "drivers/acpi-ec/acpi-ec.h"
 #include "thread/scheduler.h"
 #include "uacpi/event.h"
 #include "uacpi/utilities.h"
@@ -40,6 +41,9 @@ static uacpi_interrupt_ret acpi_on_fixed_event(uacpi_handle ctx) {
         case UACPI_FIXED_EVENT_RTC: fixed_event = "RTC"; break;
     }
     TRACE("Got fixed event: %s", fixed_event);
+
+    thread_dump();
+
     return UACPI_INTERRUPT_HANDLED;
 }
 
@@ -60,10 +64,8 @@ static void init_thread_entry(void* arg) {
     // Initialize the namespace
     CHECK_UACPI(uacpi_namespace_initialize());
 
-    // And finish finalizing the EC now that the namespace is loaded
-    RETHROW(init_ec());
-
-    // TODO: setup gpes and stuff
+    // Initialize all ACPI based drivers
+    RETHROW(init_acpi_drivers());
 
     // Finalize the wakeup sources
     CHECK_UACPI(uacpi_finalize_gpe_initialization());
@@ -112,8 +114,6 @@ static void halt() {
 static void smp_entry(struct limine_mp_info* info) {
     err_t err = NO_ERROR;
 
-    TRACE("smp: \tCPU#%ld - LAPIC#%d", info->extra_argument, info->lapic_id);
-
     //
     // Start by setting the proper CPU context
     //
@@ -121,6 +121,8 @@ static void smp_entry(struct limine_mp_info* info) {
     init_idt();
     set_cpu_features();
     switch_page_table();
+
+    TRACE("smp: \tCPU#%ld - LAPIC#%d", info->extra_argument, info->lapic_id);
 
     //
     // And now setup the per-cpu
@@ -211,8 +213,10 @@ void _start() {
     RETHROW(init_phys_mappings());
     set_cpu_features();
     switch_page_table();
-
     init_alloc();
+
+    // we have allocator, finalize the logging
+    init_logging();
 
     // load the debug symbols now that we have an allocator
     debug_load_symbols();

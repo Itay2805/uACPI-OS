@@ -230,13 +230,13 @@ uacpi_u64 uacpi_kernel_get_nanoseconds_since_boot(void) {
 
 void uacpi_kernel_stall(uacpi_u8 usec) {
     uint64_t deadline = tsc_us_deadline(usec);
-    while (tsc_check_deadline(deadline));
+    while (!tsc_check_deadline(deadline));
 }
 
 void uacpi_kernel_sleep(uacpi_u64 msec) {
     // TODO: turn into a real sleep instead
     uint64_t deadline = tsc_ms_deadline(msec);
-    while (tsc_check_deadline(deadline)) {
+    while (!tsc_check_deadline(deadline)) {
         cpu_relax();
     }
 }
@@ -289,7 +289,7 @@ void uacpi_kernel_unlock_spinlock(uacpi_handle handle, uacpi_cpu_flags flags) {
 uacpi_handle uacpi_kernel_create_mutex(void) {
     mutex_t* mutex = mem_alloc(sizeof(*mutex));
     if (mutex == NULL) return NULL;
-    *mutex = INIT_MUTEX();
+    memset(mutex, 0, sizeof(*mutex));
     return mutex;
 }
 
@@ -300,16 +300,14 @@ void uacpi_kernel_free_mutex(uacpi_handle handle) {
 uacpi_status uacpi_kernel_acquire_mutex(uacpi_handle handle, uacpi_u16 timeout) {
     mutex_t* mutex = handle;
 
-    uint64_t deadline = 0;
-    if (timeout != 0xFFFF) {
-        deadline = tsc_ms_deadline(timeout);
-    }
+    // uint64_t deadline = 0;
+    // if (timeout != 0xFFFF) {
+    //     deadline = tsc_ms_deadline(timeout);
+    // }
+    // ASSERT(deadline == 0);
 
-    if (mutex_try_lock_until(mutex, deadline)) {
-        return UACPI_STATUS_OK;
-    } else {
-        return UACPI_STATUS_TIMEOUT;
-    }
+    mutex_lock(mutex);
+    return UACPI_STATUS_OK;
 }
 
 void uacpi_kernel_release_mutex(uacpi_handle handle) {
@@ -324,7 +322,7 @@ void uacpi_kernel_release_mutex(uacpi_handle handle) {
 uacpi_handle uacpi_kernel_create_event(void) {
     semaphore_t* semaphore = mem_alloc(sizeof(*semaphore));
     if (semaphore == NULL) return NULL;
-    *semaphore = INIT_SEMAPHORE();
+    memset(semaphore, 0, sizeof(*semaphore));
     return semaphore;
 }
 
@@ -336,21 +334,24 @@ uacpi_bool uacpi_kernel_wait_for_event(uacpi_handle handle, uacpi_u16 timeout) {
     semaphore_t* semaphore = handle;
 
     // calculate the deadline
-    uint64_t deadline = 0;
-    if (timeout != 0xFFFF) {
-        deadline = tsc_ms_deadline(timeout);
-    }
-    return semaphore_wait_until(semaphore, deadline);
+    // uint64_t deadline = 0;
+    // if (timeout != 0xFFFF) {
+    //     deadline = tsc_ms_deadline(timeout);
+    // }
+    // ASSERT(deadline == 0);
+
+    semaphore_acquire(semaphore, false);
+    return true;
 }
 
 void uacpi_kernel_signal_event(uacpi_handle handle) {
     semaphore_t* semaphore = handle;
-    semaphore_signal(semaphore);
+    semaphore_release(semaphore, false);
 }
 
 void uacpi_kernel_reset_event(uacpi_handle handle) {
     semaphore_t* semaphore = handle;
-    semaphore_reset(semaphore);
+    semaphore->value = 0;
 }
 
 //
@@ -460,6 +461,7 @@ uacpi_status uacpi_kernel_install_interrupt_handler(uacpi_u32 irq, uacpi_interru
     // map the source to the irq
     ioapic_irq_t gsi = acpi_convert_isa_to_gsi(irq);
     RETHROW(ioapic_configure_irq(&gsi, irq_handler->handler.vector, 0));
+    RETHROW(ioapic_enable_irq(gsi.irq, true));
 
 cleanup:
     return err.status;

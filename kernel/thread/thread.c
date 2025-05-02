@@ -10,6 +10,9 @@
 #include "mem/alloc.h"
 #include "mem/stack.h"
 
+static list_t m_threads = LIST_INIT(&m_threads);
+static irq_spinlock_t m_threads_lock = INIT_IRQ_SPINLOCK();
+
 static thread_t* thread_alloc() {
     thread_t* thread = mem_alloc(sizeof(*thread));
     if (thread == NULL) {
@@ -20,8 +23,33 @@ static thread_t* thread_alloc() {
     // initialize anything that it needs, we multiply after the ++ because we want to get
     // the top of the stack, not the bottom of it
     thread->stack_top = stack_alloc();
+    thread->ref_count = 1;
+
+    bool irq_status = irq_spinlock_lock(&m_threads_lock);
+    list_add(&m_threads, &thread->link);
+    irq_spinlock_unlock(&m_threads_lock, irq_status);
 
     return thread;
+}
+
+static const char* m_thread_status_str[] = {
+    [THREAD_STATUS_IDLE] = "idle",
+    [THREAD_STATUS_RUNNABLE] = "runnable",
+    [THREAD_STATUS_RUNNING] = "running",
+    [THREAD_STATUS_WAITING] = "waiting",
+    [THREAD_STATUS_DEAD] = "dead",
+};
+
+void thread_dump(void) {
+    bool irq_status = irq_spinlock_lock(&m_threads_lock);
+
+    TRACE("Current threads:");
+    for (list_entry_t* entry = m_threads.next; entry != &m_threads; entry = entry->next) {
+        thread_t* thread = containerof(entry, thread_t, link);
+        TRACE("\t`%s`: %s", thread->name, m_thread_status_str[thread->status]);
+    }
+
+    irq_spinlock_unlock(&m_threads_lock, irq_status);
 }
 
 static void thread_entry() {
@@ -63,8 +91,14 @@ thread_t* thread_create(thread_entry_t callback, void* arg, const char* name_fmt
 }
 
 void thread_free(thread_t* thread) {
-    stack_free(thread->stack_top);
-    mem_free(thread);
+    if (--thread->ref_count == 0) {
+        bool irq_status = irq_spinlock_lock(&m_threads_lock);
+        list_del(&thread->link);
+        irq_spinlock_unlock(&m_threads_lock, irq_status);
+
+        stack_free(thread->stack_top);
+        mem_free(thread);
+    }
 }
 
 void thread_exit() {

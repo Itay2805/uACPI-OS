@@ -34,4 +34,4 @@ static inline uint64_t tsc_ns_deadline(uint64_t ns) { return get_tsc() + tsc_to_
 static inline uint64_t tsc_us_deadline(uint64_t ns) { return get_tsc() + tsc_to_us(ns); }
 static inline uint64_t tsc_ms_deadline(uint64_t ns) { return get_tsc() + tsc_to_ms(ns); }
 
-static inline bool tsc_check_deadline(uint64_t tsc) { return tsc >= get_tsc(); }
+static inline bool tsc_check_deadline(uint64_t tsc) { return tsc <= get_tsc(); }

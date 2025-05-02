@@ -1,5 +1,6 @@
 #include "intr.h"
 
+#include "scheduler.h"
 #include "sync/spinlock.h"
 
 #define IRQ_COUNT   (256 - 32)
@@ -88,4 +89,12 @@ void irq_dispatch(uint8_t vector) {
         interrupt_handler_t* irq = containerof(entry, interrupt_handler_t, entry);
         irq->handler(irq);
     }
+}
+
+void irq_wait(interrupt_handler_t* handler) {
+    semaphore_acquire(&handler->semaphore, false);
+}
+
+void irq_wakeup(interrupt_handler_t* handler) {
+    semaphore_release(&handler->semaphore, false);
 }

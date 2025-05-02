@@ -32,7 +32,17 @@ typedef enum ioapic_delivery_mode {
 
 typedef struct ioapic_irq {
     uint32_t irq;
+
+    /**
+     * true == level-triggered
+     * false == edge-triggered
+     */
     bool level_triggered;
+
+    /**
+     * true == active-high
+     * false = active-low
+     */
     bool assertion_level;
 } ioapic_irq_t;
 
