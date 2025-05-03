@@ -187,9 +187,12 @@ static void acpi_ec_worker(void *arg) {
 
             // call the method
             char method_name[5] = "_QXX";
-            method_name[2] = "0123456789abcdef"[(value >> 4) & 0xF];
-            method_name[3] = "0123456789abcdef"[value & 0xF];
-            CHECK_UACPI(uacpi_eval(ec->node, method_name, NULL, NULL));
+            method_name[2] = "0123456789ABCDEF"[(value >> 4) & 0xF];
+            method_name[3] = "0123456789ABCDEF"[value & 0xF];
+            uacpi_status ustatus = uacpi_eval(ec->node, method_name, NULL, NULL);
+            if (uacpi_unlikely_error(ustatus)) {
+                ERROR("acpi-ec: Failed to dispatch %s.%s: %s", ec->name, method_name, uacpi_status_to_string(ustatus));
+            }
         }
 
         if (ec->global_lock) {

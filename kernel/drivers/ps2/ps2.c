@@ -67,12 +67,12 @@ static void ps2_keyboard_worker(void* _ctx) {
         // wait for an interrupt, when returns this will be unmasked
         irq_wait(&ctx->handler);
 
-        // unlock the keyboard to ensure we can
-        // read data without any commands are issued
+        // lock the keyboard to ensure that no commands will happen
+        // while we are reading the input
         mutex_lock(&ctx->mutex);
         while (__inbyte(ctx->command_port) & PS2_OUTPUT_BUFFER_FULL) {
             uint8_t scan_code = __inbyte(ctx->data_port);
-            TRACE("GOT SCANCODE %d", scan_code);
+            // TODO: push it or something
         }
         mutex_unlock(&ctx->mutex);
 
