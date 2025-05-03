@@ -32,5 +32,9 @@ void acpi_stall(uint64_t ns);
 
 /**
  * Convert an ISA IRQ into a GSI value.
+ *
+ * @param isa_irq                   [IN] The ISA interrupt we want to convert
+ * @param default_assertion_level   [IN] If no override was found, what level do you want (true == level-triggered, false == edge-triggered)
+ * @param default_level_triggered   [IN] If no override was found, what polarity do you want (true == active-high, false == active-low)
  */
-ioapic_irq_t acpi_convert_isa_to_gsi(uint8_t isa_irq);
+ioapic_irq_t acpi_convert_isa_to_gsi(uint8_t isa_irq, bool default_level_triggered, bool default_assertion_level);

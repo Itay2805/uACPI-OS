@@ -70,6 +70,10 @@ cleanup:
 }
 
 void irq_free(interrupt_handler_t* handler) {
+    if (handler->entry.next == NULL) {
+        return;
+    }
+
     spinlock_lock(&m_irq_bitmap_lock);
     list_del(&handler->entry);
     int w = (handler->vector - 0x20) / 32;

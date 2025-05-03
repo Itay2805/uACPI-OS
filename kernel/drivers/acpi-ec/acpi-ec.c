@@ -321,7 +321,7 @@ cleanup:
 // EC ACPI driver
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-static err_t acpi_ec_init(uacpi_namespace_node* node, const char* abs_path) {
+static err_t acpi_ec_init(uacpi_namespace_node* node, uacpi_namespace_node_info* info, const uacpi_char* abs_path, uint32_t sta_flags) {
     err_t err = NO_ERROR;
     uacpi_resources* resources = NULL;
 

@@ -129,12 +129,12 @@ cleanup:
     return err;
 }
 
-ioapic_irq_t acpi_convert_isa_to_gsi(uint8_t isa_irq) {
+ioapic_irq_t acpi_convert_isa_to_gsi(uint8_t isa_irq, bool default_level_triggered, bool default_assertion_level) {
     // ISA bus is level-triggered, active-low by default
     ioapic_irq_t entry = (ioapic_irq_t){
         .irq = isa_irq,
-        .level_triggered = false,
-        .assertion_level = false,
+        .level_triggered = default_level_triggered,
+        .assertion_level = default_assertion_level,
     };
 
     // search for an override entry for this isa irq
@@ -246,7 +246,9 @@ uacpi_u64 uacpi_kernel_get_nanoseconds_since_boot(void) {
 
 void uacpi_kernel_stall(uacpi_u8 usec) {
     uint64_t deadline = tsc_us_deadline(usec);
-    while (!tsc_check_deadline(deadline));
+    while (!tsc_check_deadline(deadline)) {
+        cpu_relax();
+    }
 }
 
 void uacpi_kernel_sleep(uacpi_u64 msec) {
@@ -475,17 +477,27 @@ uacpi_status uacpi_kernel_install_interrupt_handler(uacpi_u32 irq, uacpi_interru
     RETHROW(irq_allocate(&irq_handler->handler));
 
     // map the source to the irq
-    ioapic_irq_t gsi = acpi_convert_isa_to_gsi(irq);
+    ioapic_irq_t gsi = acpi_convert_isa_to_gsi(irq, false, false);
     RETHROW(ioapic_configure_irq(&gsi, irq_handler->handler.vector, 0));
     RETHROW(ioapic_enable_irq(gsi.irq, true));
 
+    // output the handler
+    *out_irq_handle = irq_handler;
+
 cleanup:
+    if (IS_ERROR(err)) {
+        irq_free(&irq_handler->handler);
+        mem_free(irq_handler);
+    }
+
     return err.status;
 }
 
 uacpi_status uacpi_kernel_uninstall_interrupt_handler(uacpi_interrupt_handler handler, uacpi_handle irq_handle) {
-    TRACE("TODO: uacpi_kernel_uninstall_interrupt_handler");
-    return UACPI_STATUS_UNIMPLEMENTED;
+    uacpi_interrupt_handler_t* irq_handler = irq_handle;
+    irq_free(&irq_handler->handler);
+    mem_free(handler);
+    return UACPI_STATUS_OK;
 }
 
 //

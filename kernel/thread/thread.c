@@ -70,7 +70,7 @@ thread_t* thread_vcreate(thread_entry_t callback, void* arg, const char* name_fm
     }
 
     // set the name
-    uacpi_snprintf(thread->name, sizeof(thread->name), name_fmt, va);
+    uacpi_vsnprintf(thread->name, sizeof(thread->name), name_fmt, va);
 
     // initialize the callback, this will be used by the thread_entry to
     // call the real entry point

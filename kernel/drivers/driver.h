@@ -1,6 +1,6 @@
 #pragma once
 #include "lib/except.h"
-
+#include "uacpi/utilities.h"
 
 typedef struct acpi_driver {
     /**
@@ -16,7 +16,7 @@ typedef struct acpi_driver {
     /**
      * Initialize an ACPI device that matched the description
      */
-    err_t (*init)(uacpi_namespace_node* node, const uacpi_char* abs_path);
+    err_t (*init)(uacpi_namespace_node* node, uacpi_namespace_node_info* info, const uacpi_char* abs_path, uint32_t sta_flags);
 } acpi_driver_t;
 
 #define ACPI_DRIVER(driver_name, acpi_name, init_function) \
