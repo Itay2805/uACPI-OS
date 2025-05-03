@@ -69,6 +69,16 @@ typedef struct acpi_ec {
      * handler and the thread
      */
     semaphore_t semaphore;
+
+    /**
+     * The thread that owns the lock
+     */
+    thread_t* lock_owner;
+
+    /**
+     * The depth of the lock
+     */
+    size_t lock_depth;
 } acpi_ec_t;
 
 /**
@@ -111,16 +121,92 @@ static uint8_t acpi_ec_read_data(acpi_ec_t* ec) {
     return __inbyte(ec->data_port);
 }
 
+static uint32_t acpi_ec_lock(acpi_ec_t* ec) {
+    // recursive lock, don't lock twice
+    thread_t* current = scheduler_get_current_thread();
+    if (ec->lock_owner == current) {
+        ec->lock_depth++;
+        return 0;
+    }
+
+    // actually need to lock
+    uint32_t glk_seq = 0;
+    if (ec->global_lock) {
+        uacpi_acquire_global_lock(0xFFFF, &glk_seq);
+    } else {
+        mutex_lock(&ec->lock);
+    }
+
+    ec->lock_owner = current;
+
+    return glk_seq;
+}
+
+static void acpi_ec_unlock(acpi_ec_t* ec, uint32_t seq) {
+    ASSERT(ec->lock_owner == scheduler_get_current_thread());
+    if (--ec->lock_depth == 0) {
+        ec->lock_owner = NULL;
+        if (ec->global_lock) {
+            uacpi_release_global_lock(seq);
+        } else {
+            mutex_unlock(&ec->lock);
+        }
+    }
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // GPE handling
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 static uacpi_status acpi_ec_op_handler(uacpi_region_op op, uacpi_handle op_data) {
     switch (op) {
+        case UACPI_REGION_OP_ATTACH: {
+            // nothing to do
+        } break;
+
+        case UACPI_REGION_OP_DETACH: {
+            // nothing to do
+        } break;
+
+        case UACPI_REGION_OP_READ: {
+            uacpi_region_rw_data* data = op_data;
+            acpi_ec_t* ec = data->handler_context;
+
+            // can only read one byte at a time from the EC
+            if (data->byte_width != 1 || data->offset > 0xFF) {
+                return UACPI_STATUS_INVALID_ARGUMENT;
+            }
+
+            // perform the read
+            uint32_t seq = acpi_ec_lock(ec);
+            acpi_ec_write_command(ec, RD_EC);
+            acpi_ec_write_data(ec,  data->offset);
+            data->value = acpi_ec_read_data(ec);
+            acpi_ec_unlock(ec, seq);
+        } break;
+
+        case UACPI_REGION_OP_WRITE: {
+            uacpi_region_rw_data* data = op_data;
+            acpi_ec_t* ec = data->handler_context;
+
+            // can only read one byte at a time from the EC
+            if (data->byte_width != 1 || data->offset > 0xFF || data->value > 0xFF) {
+                return UACPI_STATUS_INVALID_ARGUMENT;
+            }
+
+            // perform the read
+            uint32_t seq = acpi_ec_lock(ec);
+            acpi_ec_write_command(ec, WD_EC);
+            acpi_ec_write_data(ec, data->offset);
+            acpi_ec_write_data(ec, data->value);
+            acpi_ec_unlock(ec, seq);
+        } break;
+
         default: {
             ERROR("UNKNOWN OP %d", op);
         } return UACPI_STATUS_UNIMPLEMENTED;
     }
+    return UACPI_STATUS_OK;
 }
 
 static uacpi_interrupt_ret acpi_ec_gpe_handler(uacpi_handle ctx, uacpi_namespace_node* gpe_device, uacpi_u16 idx) {
@@ -165,14 +251,7 @@ static void acpi_ec_worker(void *arg) {
         // wait for event
         semaphore_acquire(&ec->semaphore, false);
 
-        // ensure we don't run this multiple times
-        mutex_lock(&ec->lock);
-
-        uint32_t seq;
-        if (ec->global_lock) {
-            // take the global lock
-            CHECK_UACPI(uacpi_acquire_global_lock(-1, &seq));
-        }
+        uint32_t seq = acpi_ec_lock(ec);
 
         // run this until the SCI_EVT is cleared
         for (;;) {
@@ -195,12 +274,7 @@ static void acpi_ec_worker(void *arg) {
             }
         }
 
-        if (ec->global_lock) {
-            // release the global lock if required
-            uacpi_release_global_lock(seq);
-        }
-
-        mutex_unlock(&ec->lock);
+        acpi_ec_unlock(ec, seq);
 
         // unmask the GPE, so more interrupts can come, at this point another interrupt
         // may fire and we will just handle it at the next loop
@@ -231,9 +305,13 @@ static err_t acpi_init_ec(acpi_ec_t* ec) {
     CHECK_ERROR(ec != NULL, UACPI_STATUS_OUT_OF_MEMORY);
     scheduler_start_thread(ec->thread);
 
-    // Install the address space handler for this EC
+    // apparently some firmwares do a funny and will use the operation region outside of the
+    // EC node, to handle that we are going to forcefully install at the root node the handler
+    // of either the ECDT or the uid 0 (aka the first EC), the rest are going to be scoped
+    // correctly
+    uacpi_namespace_node* install_node = (ec == m_boot_ec) ? uacpi_namespace_root() : ec->node;
     CHECK_UACPI(uacpi_install_address_space_handler(
-        ec->node,
+        install_node,
         UACPI_ADDRESS_SPACE_EMBEDDED_CONTROLLER,
         acpi_ec_op_handler,
         ec
