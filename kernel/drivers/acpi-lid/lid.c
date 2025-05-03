@@ -6,7 +6,7 @@
 static uacpi_status acpi_lid_notification(uacpi_handle context, uacpi_namespace_node *node, uacpi_u64 value) {
     err_t err = NO_ERROR;
 
-    if ((value & 0x80) != 0) {
+    if (value == 0x80) {
         uint64_t value = 0;
         CHECK_UACPI(uacpi_eval_simple_integer(node, "_LID", &value));
         TRACE("Lid state changed! current state - %s", value == 0 ? "closed" : "open");

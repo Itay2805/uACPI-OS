@@ -216,8 +216,6 @@ static uacpi_interrupt_ret acpi_ec_gpe_handler(uacpi_handle ctx, uacpi_namespace
     // ensure that the device and idx matches our handler
     CHECK(ec->gpe_bit == idx);
 
-    TRACE("acpi-ec: Got GPE from %s", ec->name);
-
     // get the status and check if what we need to do
     uint8_t status = __inbyte(ec->control_port);
     if (status & SCI_EVT) {

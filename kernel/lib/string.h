@@ -9,3 +9,5 @@
 
 #define strlen __builtin_strlen
 #define strcmp __builtin_strcmp
+
+char* strdup(const char* str);

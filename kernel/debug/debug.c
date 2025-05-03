@@ -56,7 +56,7 @@ static void insert_symbol(symbol_t symbol) {
     }
 }
 
-static char* strdup(const char* str) {
+char* strdup(const char* str) {
     int len = strlen(str);
     char* str2 = mem_alloc(len + 1);
     memcpy(str2, str, len + 1);
